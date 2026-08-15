@@ -200,6 +200,10 @@ The `connection` package's `apply()` had a bug: it called `isTrustedApiRequest(r
 - **The trust fence is not a substitute for a VPN or reverse proxy with auth.** If you need internet exposure, put dsh behind an authenticated reverse proxy and do not use `--host 0.0.0.0` directly.
 - The original Harness intentionally rejected `--host 0.0.0.0` for this reason. This adapter re-enables it with the understanding that you accept the LAN-exposure risk.
 
+## Remote access via FRP (public server)
+
+If you have a VPS with a public IP and want to access dsh from anywhere (not just the same Wi-Fi), tunnel the local `dsh web` port through [FRP](https://github.com/fatedier/frp). A full guide — covering `frps`/`frpc` setup, the `--trusted-host` value for a public domain, Nginx + HTTPS + Basic Auth hardening, and an stcp point-to-point mode that opens no public ports — is in **[docs/FRP-GUIDE.zh.md](docs/FRP-GUIDE.zh.md)** (Chinese). Sample configs are in [`frp/`](frp/).
+
 ## Updating
 
 When the base `deepseek-harness` repo advances:

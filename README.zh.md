@@ -200,6 +200,10 @@ export OPENCODE_PROXY_KEY="your-proxy-key"
 - **信任栅栏不能替代 VPN 或带认证的反向代理。** 如果需要互联网暴露，把 dsh 放在带认证的反向代理后面，不要直接用 `--host 0.0.0.0`。
 - 原版 Harness 出于这个原因有意拒绝了 `--host 0.0.0.0`。本适配器重新启用了它，前提是你接受局域网暴露的风险。
 
+## 通过 FRP 公网穿透（有公网服务器）
+
+如果你有一台带公网 IP 的 VPS，想随时随地（不限同一 Wi-Fi）访问 dsh，可以用 [FRP](https://github.com/fatedier/frp) 把本地 `dsh web` 端口穿透到公网。完整教程——涵盖 `frps`/`frpc` 配置、公网域名对应的 `--trusted-host` 值、Nginx + HTTPS + Basic Auth 加固、以及不开放公网端口的 stcp 点对点模式——见 **[docs/FRP-GUIDE.zh.md](docs/FRP-GUIDE.zh.md)**。示例配置文件在 [`frp/`](frp/) 目录。
+
 ## 更新
 
 当基础 `deepseek-harness` 仓库推进时：

@@ -1,0 +1,16 @@
+# frpc.toml — 在本地 Mac 上运行
+# 把本地 dsh web (3700) 通过 FRP 映射到 VPS 的 7001 端口
+
+serverAddr = "你的VPS公网IP或域名"
+serverPort = 7000
+
+# 必须和 frps.toml 里的 auth.token 一致
+auth.method = "token"
+auth.token = "改成你自己的随机长字符串"
+
+[[proxies]]
+name = "dsh-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 3700
+remotePort = 7001

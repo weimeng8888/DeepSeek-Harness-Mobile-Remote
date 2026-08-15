@@ -1,0 +1,13 @@
+# frps.toml — 在公网 VPS 上运行
+# 下载: https://github.com/fatedier/frp/releases
+
+bindPort = 7000
+
+# frpc 必须带正确 token 才能建隧道，防止陌生人挂隧道
+auth.method = "token"
+auth.token = "改成你自己的随机长字符串"
+
+# 可选 dashboard：浏览器看隧道状态
+webServer.addr = "127.0.0.1:7500"
+webServer.user = "admin"
+webServer.password = "改成你自己的密码"
