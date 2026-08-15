@@ -1,0 +1,2197 @@
+diff --git a/apps/cli/reference/README.md b/apps/cli/reference/README.md
+index 0be64fd..145d761 100644
+--- a/apps/cli/reference/README.md
++++ b/apps/cli/reference/README.md
+@@ -61,7 +61,7 @@ dsh web --dump-config
+ dsh web --help
+ ```
+ 
+-The production Web runner needs built package and frontend artifacts (`pnpm run build`). It serves `http://127.0.0.1:3080` by default. The CLI intentionally does not support `--host 0.0.0.0` yet and exits with a usage error; `--trusted-host` adds named authorities accepted by the `/api` browser-trust fence.
++The production Web runner needs built package and frontend artifacts (`pnpm run build`). It serves `http://127.0.0.1:3080` by default. `--host 0.0.0.0` binds all interfaces for LAN access (the LAN URL is printed at startup); `--trusted-host` adds named authorities accepted by the `/api` browser-trust fence.
+ 
+ Process shutdown gives the plugin tree up to five seconds to dispose. The first `SIGINT`/`SIGTERM` starts that graceful drain — `SIGTERM` is a supervisor's ordinary stop request and exits 0 on every surface, `SIGINT` reports 130; a second signal forces immediate exit. If one-shot normal completion is already stuck in disposal, the first `Ctrl+C` is the escalation and exits immediately instead of being swallowed.
+ 
+diff --git a/apps/cli/reference/README.zh.md b/apps/cli/reference/README.zh.md
+index 649bf15..1eaaae2 100644
+--- a/apps/cli/reference/README.zh.md
++++ b/apps/cli/reference/README.zh.md
+@@ -61,7 +61,7 @@ dsh web --dump-config
+ dsh web --help
+ ```
+ 
+-生产 Web 运行器需要已构建的包和前端产物（`pnpm run build`）。默认服务地址是 `http://127.0.0.1:3080`。CLI 目前有意不支持 `--host 0.0.0.0`，并会以用法错误退出；`--trusted-host` 可添加 `/api` 浏览器信任围栏接受的具名 authority。
++生产 Web 运行器需要已构建的包和前端产物（`pnpm run build`）。默认服务地址是 `http://127.0.0.1:3080`。`--host 0.0.0.0` 可绑定所有网络接口以实现局域网访问（启动时打印局域网 URL）；`--trusted-host` 可添加 `/api` 浏览器信任栅栏接受的具名 authority。
+ 
+ 进程关闭时，插件树最多有 5 秒完成 dispose。首次收到 `SIGINT` 或 `SIGTERM` 时会开始优雅排空：`SIGTERM` 是监督进程发出的常规停止请求，在所有运行模式下都以 0 退出；`SIGINT` 则报告 130。第二次收到信号时会立即强制退出。如果一次性运行在正常结束时已经卡在 dispose 阶段，第一次按下 `Ctrl+C` 就会直接升级为强制退出，而不会被忽略。
+ 
+diff --git a/apps/cli/tests/built-bin.e2e.ts b/apps/cli/tests/built-bin.e2e.ts
+index f887c17..803440d 100644
+--- a/apps/cli/tests/built-bin.e2e.ts
++++ b/apps/cli/tests/built-bin.e2e.ts
+@@ -339,14 +339,15 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)',
+       expect(web.stdout).toContain('--port <port>')
+       expect(web.stdout).not.toContain('dsh web: http://')
+ 
+-      const wildcardHost = await runBuiltBin(['web', '--host', '0.0.0.0'], {
++      const wildcardHost = await runBuiltBin(['web', '--host', '0.0.0.0', '--help'], {
+         DSH_HOME: home,
+         DSH_TELEMETRY_DISABLED: '1',
+       })
+-      expect(wildcardHost.code).toBe(1)
+-      expect(wildcardHost.stdout).toBe('')
+-      expect(wildcardHost.stderr).toContain('--host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
+-      expect(wildcardHost.stderr).not.toContain('dsh web: http://')
++      expect(wildcardHost.code).toBe(0)
++      expect(wildcardHost.stderr).toBe('')
++      expect(wildcardHost.stdout).toContain('--host <host>')
++      expect(wildcardHost.stdout).toContain('0.0.0.0')
++      expect(wildcardHost.stdout).toContain('LAN')
+ 
+       const headlessHelp = await runBuiltBin(['--profile', 'headless', '--help'], {
+         DSH_HOME: home,
+diff --git a/apps/web/index.html b/apps/web/index.html
+index a14de72..b04039f 100644
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -2,7 +2,7 @@
+ <html lang="zh-CN">
+   <head>
+     <meta charset="utf-8" />
+-    <meta name="viewport" content="width=device-width, initial-scale=1" />
++    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+     <link rel="manifest" href="/manifest.webmanifest" />
+     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+     <title>DeepSeek Harness</title>
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 7b9ef7a..1e245aa 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -20,7 +20,8 @@ function rejectStandaloneServe(): Plugin {
+ 
+ /**
+  * Vendor-chunk membership, by exact npm package name — the heavy render
+- * families (math, highlight, markdown) that change only on dependency bumps.
++ * families (highlight, markdown) that change only on dependency bumps. KaTeX
++ * (math) is loaded on demand and deliberately absent (see the set below).
+  * Only packages workspace code imports DIRECTLY need listing: their private
+  * transitive dependencies (oniguruma machinery, character tables, …) are
+  * imported solely by these and rollup's chunk coloring pulls them into
+@@ -39,8 +40,11 @@ function rejectStandaloneServe(): Plugin {
+  * rides index.
+  */
+ const VENDOR_PACKAGES: ReadonlySet<string> = new Set([
+-  // math
+-  'katex',
++  // KaTeX is loaded on demand (the first settled math node triggers a
++  // dynamic import in ui-primitives' katex.tsx) — listing it here would force
++  // the dynamic import's modules back into the boot-time vendor chunk,
++  // defeating the lazy load. Leave it unassigned so rollup emits a separate
++  // KaTeX chunk fetched only when math renders.
+   // syntax highlight (@shikijs/langs is handled separately below —
+   // lazy grammars must not land here)
+   'shiki',
+@@ -93,6 +97,15 @@ export default defineConfig({
+   plugins: [rejectStandaloneServe(), react()],
+   build: {
+     sourcemap: true,
++    // Keep the on-demand katex chunk out of the entry's preload set: without
++    // this filter Vite hoists a dynamic-import-only chunk into <link
++    // rel="modulepreload"> (and its CSS into <link rel="stylesheet">), so the
++    // browser would fetch KaTeX on every first paint even for sessions that
++    // never render math. Filtering by filename keeps vendor preloaded
++    // (boot-critical) while katex stays fetched only when math renders.
++    modulePreload: {
++      resolveDependencies: (_filename, deps) => deps.filter(url => !url.includes('/katex-')),
++    },
+     rollupOptions: {
+       output: {
+         // Output layout: the two main chunks stay at assets/ root; lazy
+@@ -121,6 +134,13 @@ export default defineConfig({
+           if (pkg === '@shikijs/langs') {
+             return BOOT_GRAMMAR_FILES.some(file => id.endsWith(`/${file}`)) ? 'vendor' : undefined
+           }
++          // KaTeX is loaded on demand (ui-primitives' katex.tsx dynamic-imports
++          // it on the first settled math node). Assigning it to its own chunk
++          // makes that chunk async — fetched only when math renders — rather
++          // than rollup merging the dynamically-imported modules back into the
++          // boot-critical vendor chunk (which returning `undefined` would do
++          // under a custom manualChunks function).
++          if (pkg === 'katex') return 'katex'
+           return VENDOR_PACKAGES.has(pkg) ? 'vendor' : undefined
+         },
+       },
+diff --git a/packages/bundle/web-app/README.md b/packages/bundle/web-app/README.md
+index 90d1566..af119dc 100644
+--- a/packages/bundle/web-app/README.md
++++ b/packages/bundle/web-app/README.md
+@@ -2,7 +2,7 @@
+ 
+ English | [中文](README.zh.md)
+ 
+-The dsh browser-surface bundle. [`cordis.patch.yml`](cordis.patch.yml) rides over [`dsh-base`](../base/README.md): it sets the coding persona, inserts the Web host rows (webserver, API gateway, workspace, projection cache, storage) and the browser plugin roster, the always-on client-plugin reload chain ([`dsh-client-hmr`](../../client/hmr/README.md), idle until a rebuild watcher rewrites client bundles), and mounts this package's `web-runtime` glue plugin (config `{printUrl, surfaceContext, trustedHosts}`). That plugin resolves the built frontend dist through `@deepseek-ai/dsh-web-frontend`'s exports, samples bind-dependent LAN trust once, provides it as `webRuntime` to the browser-trust fence and client roster, mounts the [`frontend-static`](../../host/frontend-static/README.md) fallback owner, registers the harness-source and web-surface prompt sections plus the bash-visible `DSH_WEB_URL` runtime variable when `surfaceContext` is true, and prints the `dsh web:` URL line when `printUrl` is true, after its Loader tree settles so a sibling failure cannot announce a dead app. This bundle also owns the app command line: the ordinary `web-startup` provider ([`src/startup.ts`](src/startup.ts)) injects `ctx.cmdlineArgs` ([`dsh-cmdline`](../../boot/cmdline/README.md)), parses `--host`, `--port`, repeatable `--trusted-host`, and the app's `--help`, then provides `webStartup`. It rejects `--host 0.0.0.0` before publishing that service because the CLI intentionally does not support all-interfaces binding yet. Flag-configured rows inject the service and read it directly from lazy config, so nothing binds a port before argument resolution and `dsh --profile web --help` starts no server. [`dsh-headless`](../headless/README.md) is a sibling surface over the same base and does not mount this bundle.
++The dsh browser-surface bundle. [`cordis.patch.yml`](cordis.patch.yml) rides over [`dsh-base`](../base/README.md): it sets the coding persona, inserts the Web host rows (webserver, API gateway, workspace, projection cache, storage) and the browser plugin roster, the always-on client-plugin reload chain ([`dsh-client-hmr`](../../client/hmr/README.md), idle until a rebuild watcher rewrites client bundles), and mounts this package's `web-runtime` glue plugin (config `{printUrl, surfaceContext, trustedHosts}`). That plugin resolves the built frontend dist through `@deepseek-ai/dsh-web-frontend`'s exports, samples bind-dependent LAN trust once, provides it as `webRuntime` to the browser-trust fence and client roster, mounts the [`frontend-static`](../../host/frontend-static/README.md) fallback owner, registers the harness-source and web-surface prompt sections plus the bash-visible `DSH_WEB_URL` runtime variable when `surfaceContext` is true, and prints the `dsh web:` URL line when `printUrl` is true, after its Loader tree settles so a sibling failure cannot announce a dead app. This bundle also owns the app command line: the ordinary `web-startup` provider ([`src/startup.ts`](src/startup.ts)) injects `ctx.cmdlineArgs` ([`dsh-cmdline`](../../boot/cmdline/README.md)), parses `--host`, `--port`, repeatable `--trusted-host`, and the app's `--help`, then provides `webStartup`. `--host 0.0.0.0` binds all interfaces for LAN access; the /api browser-trust fence (ip-literals from the bind + --trusted-host) is the deployment's exposure boundary. Flag-configured rows inject the service and read it directly from lazy config, so nothing binds a port before argument resolution and `dsh --profile web --help` starts no server. [`dsh-headless`](../headless/README.md) is a sibling surface over the same base and does not mount this bundle.
+ 
+ ## Model Experience
+ 
+diff --git a/packages/bundle/web-app/README.zh.md b/packages/bundle/web-app/README.zh.md
+index b7156bc..3e79b6c 100644
+--- a/packages/bundle/web-app/README.zh.md
++++ b/packages/bundle/web-app/README.zh.md
+@@ -2,7 +2,7 @@
+ 
+ [English](README.md) | 中文
+ 
+-dsh 浏览器表层组合包。[`cordis.patch.yml`](cordis.patch.yml) 叠加在 [`dsh-base`](../base/README.md) 之上：设置 coding persona，插入 Web 宿主行（webserver、API 网关、workspace、投影缓存、存储）、浏览器插件名录与始终挂载的客户端插件重载链（[`dsh-client-hmr`](../../client/hmr/README.md)，在重建 watcher 改写客户端 bundle 之前保持空闲），并挂载本包的 `web-runtime` 粘合插件（配置为 `{printUrl, surfaceContext, trustedHosts}`）。该插件通过 `@deepseek-ai/dsh-web-frontend` 的 exports 解析已构建的前端 dist，只采样一次依赖 bind 的 LAN 信任信息并将其作为 `webRuntime` 提供给浏览器信任栅栏和客户端名录，挂载 [`frontend-static`](../../host/frontend-static/README.md) 回退席位所有者，在 `surfaceContext` 为 true 时注册 Harness 源码与 Web 表层提示词段落，以及 bash 可见的 `DSH_WEB_URL` 运行时变量，并在 `printUrl` 为 true 时等自身的 Loader 配置树结算后再打印 `dsh web:` URL 行，避免兄弟行失败时公告一个已失效的应用。本组合包还持有应用命令行：普通 `web-startup` 提供方（[`src/startup.ts`](src/startup.ts)）注入 `ctx.cmdlineArgs`（[`dsh-cmdline`](../../boot/cmdline/README.md)），解析 `--host`、`--port`、可重复的 `--trusted-host` 以及应用自己的 `--help`，再提供 `webStartup`。它会在发布该服务前拒绝 `--host 0.0.0.0`，因为 CLI 目前有意不支持绑定所有网络接口。由 flag 配置的行会注入该服务，并在惰性配置中直接读取它，因此参数解析完成前不会有任何东西绑定端口，`dsh --profile web --help` 也不会启动服务器。[`dsh-headless`](../headless/README.md) 是同一 base 之上的同级表层，不挂载本组合包。
++dsh 浏览器表层组合包。[`cordis.patch.yml`](cordis.patch.yml) 叠加在 [`dsh-base`](../base/README.md) 之上：设置 coding persona，插入 Web 宿主行（webserver、API 网关、workspace、投影缓存、存储）、浏览器插件名录与始终挂载的客户端插件重载链（[`dsh-client-hmr`](../../client/hmr/README.md)，在重建 watcher 改写客户端 bundle 之前保持空闲），并挂载本包的 `web-runtime` 粘合插件（配置为 `{printUrl, surfaceContext, trustedHosts}`）。该插件通过 `@deepseek-ai/dsh-web-frontend` 的 exports 解析已构建的前端 dist，只采样一次依赖 bind 的 LAN 信任信息并将其作为 `webRuntime` 提供给浏览器信任栅栏和客户端名录，挂载 [`frontend-static`](../../host/frontend-static/README.md) 回退席位所有者，在 `surfaceContext` 为 true 时注册 Harness 源码与 Web 表层提示词段落，以及 bash 可见的 `DSH_WEB_URL` 运行时变量，并在 `printUrl` 为 true 时等自身的 Loader 配置树结算后再打印 `dsh web:` URL 行，避免兄弟行失败时公告一个已失效的应用。本组合包还持有应用命令行：普通 `web-startup` 提供方（[`src/startup.ts`](src/startup.ts)）注入 `ctx.cmdlineArgs`（[`dsh-cmdline`](../../boot/cmdline/README.md)），解析 `--host`、`--port`、可重复的 `--trusted-host` 以及应用自己的 `--help`，再提供 `webStartup`。`--host 0.0.0.0` 可绑定所有网络接口以实现局域网访问；/api 浏览器信任栅栏（绑定产生的 IP 字面量 + --trusted-host）是部署的暴露边界。由 flag 配置的行会注入该服务，并在惰性配置中直接读取它，因此参数解析完成前不会有任何东西绑定端口，`dsh --profile web --help` 也不会启动服务器。[`dsh-headless`](../headless/README.md) 是同一 base 之上的同级表层，不挂载本组合包。
+ 
+ ## 模型体验
+ 
+diff --git a/packages/bundle/web-app/cordis.patch.yml b/packages/bundle/web-app/cordis.patch.yml
+index b06e63b..39d11ca 100644
+--- a/packages/bundle/web-app/cordis.patch.yml
++++ b/packages/bundle/web-app/cordis.patch.yml
+@@ -421,4 +421,4 @@
+     - id: agent-presets
+       name: '@deepseek-ai/dsh-agent-presets'
+       config:
+-        default: standard
++        default: code
+diff --git a/packages/bundle/web-app/src/startup.ts b/packages/bundle/web-app/src/startup.ts
+index af6997c..587326b 100644
+--- a/packages/bundle/web-app/src/startup.ts
++++ b/packages/bundle/web-app/src/startup.ts
+@@ -45,30 +45,32 @@ function webCommand(): Command {
+     .name('dsh --profile web')
+     .description('Serve the DeepSeek Harness browser UI.')
+     .helpOption('-h, --help', 'show this help')
+-    .option('--host <host>', 'bind host')
++    .option('--host <host>', 'bind host (127.0.0.1 for loopback only; 0.0.0.0 for LAN access)')
+     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
+     .option('--trusted-host <authority...>', 'extra authority the /api browser-trust fence accepts (host or host:port; repeatable)')
+     .addHelpText('after', `
+ Examples:
+   dsh --profile web                          serve on the composed host and port
+   dsh --profile web --port 8080              serve on another port
++  dsh --profile web --host 0.0.0.0           serve on all interfaces for LAN access
++    (the LAN URL is printed at startup; the /api trust fence accepts
++     LAN IP literals derived from the bind)
+ `)
+ }
+ 
+ /**
+  * Parse and provide the Web invocation as an ordinary Cordis service. The
+- * command's action publishes the flags this invocation named; `--host 0.0.0.0`
+- * or a non-numeric `--port` is a usage error, so on rejection (and on `--help`)
+- * nothing is provided.
++ * command's action publishes the flags this invocation named; a non-numeric
++ * `--port` is a usage error, so on rejection (and on `--help`) nothing is
++ * provided. `--host 0.0.0.0` binds all interfaces for LAN access; the
++ * /api browser-trust fence (ip-literals from the bind + --trusted-host)
++ * is the deployment's exposure boundary.
+  * @param ctx - plugin context carrying the command line.
+  */
+ export function apply(ctx: Context): void {
+   const program = webCommand()
+   program.action(() => {
+     const options = program.opts<WebOptions>()
+-    if (options.host === '0.0.0.0') {
+-      program.error('error: --host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
+-    }
+     if (options.port !== undefined && !/^\d+$/.test(options.port)) {
+       program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
+     }
+diff --git a/packages/bundle/web-app/tests/startup.spec.ts b/packages/bundle/web-app/tests/startup.spec.ts
+index 26e347a..54c9d8a 100644
+--- a/packages/bundle/web-app/tests/startup.spec.ts
++++ b/packages/bundle/web-app/tests/startup.spec.ts
+@@ -129,11 +129,14 @@ describe('web command-line provider', () => {
+     expect(observed.exits).toEqual([1])
+   })
+ 
+-  it('rejects the intentionally unsupported all-interfaces host before the consumer activates', async () => {
++  it('publishes the all-interfaces host for LAN access', async () => {
+     const { values, observed } = await bootProvider(['--host', '0.0.0.0'])
+-    expect(observed.out).toContain('--host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
+-    expect(values).toBeUndefined()
+-    expect(observed.readerConfig).toBeUndefined()
+-    expect(observed.exits).toEqual([1])
++    expect(values).toEqual({ host: '0.0.0.0', trustedHosts: [] })
++    expect(observed.readerConfig).toEqual({
++      host: '0.0.0.0',
++      port: 3080,
++      trustedHosts: [],
++    })
++    expect(observed.exits).toEqual([])
+   })
+ })
+diff --git a/packages/client/connection/README.md b/packages/client/connection/README.md
+index f0a707c..e4055d1 100644
+--- a/packages/client/connection/README.md
++++ b/packages/client/connection/README.md
+@@ -6,7 +6,7 @@ Wire consumer layer: the client plugin's apply mounts `ctx.connection` (shared a
+ 
+ ## /api browser-trust fence
+ 
+-The node half guards every entry under `/api` before bridging or upgrading (`src/api-request-trust.ts`). Every request — browser-marked or not — must present a `Host` that is a loopback authority or matches a `trustedHosts` entry: exact on `host:port` entries, any port on port-less entries, both sides compared through WHATWG normalization (DNS-rebinding defense). There is deliberately no shortcut for unmarked HTTP requests: over plain HTTP a browser attaches neither `Origin` nor Fetch-Metadata to image and navigation reads, so an unmarked request may still be a rebound browser read with a readable response, and Host is the one header rebinding cannot forge; a browser WebSocket handshake carries `Origin` and passes the same comparison. Non-browser clients pass the same fence via loopback, deployment-derived LAN IP literals, or a declared authority. When markers are present, an attached `Origin` must equal the Host authority, and an explicit `sec-fetch-site: cross-site` marker is refused. A `trustedHosts` entry that is not a bare, canonical `host[:port]` authority — one WHATWG parsing reads back exactly as written — fails the plugin load loudly: parsing would otherwise quietly authorize the hostname inside `harness.internal/path`, or broaden a dangling-colon or zero-padded port to an any-port grant. HTTP failures answer plain 403 before any RPC dispatch; upgrade failures reject the handshake before any event stream starts. Non-loopback compositions must trust their serving authorities explicitly: the Web runtime derives LAN IP literals from an all-interfaces server config, while `trustedHosts` in cordis.yml and the CLI's `--trusted-host` flag declare named authorities. `dsh web --host 0.0.0.0` is intentionally unsupported until remote access has an authentication layer. The fence is a reachability policy, not authentication; the Web carrier provides no authentication layer. Decision record: [the api browser-trust boundary Agent Note](../../../.agents/notes/implemented/architecture/2026-07-28-api-browser-trust-boundary.md).
++The node half guards every entry under `/api` before bridging or upgrading (`src/api-request-trust.ts`). Every request — browser-marked or not — must present a `Host` that is a loopback authority or matches a `trustedHosts` entry: exact on `host:port` entries, any port on port-less entries, both sides compared through WHATWG normalization (DNS-rebinding defense). There is deliberately no shortcut for unmarked HTTP requests: over plain HTTP a browser attaches neither `Origin` nor Fetch-Metadata to image and navigation reads, so an unmarked request may still be a rebound browser read with a readable response, and Host is the one header rebinding cannot forge; a browser WebSocket handshake carries `Origin` and passes the same comparison. Non-browser clients pass the same fence via loopback, deployment-derived LAN IP literals, or a declared authority. When markers are present, an attached `Origin` must equal the Host authority, and an explicit `sec-fetch-site: cross-site` marker is refused. A `trustedHosts` entry that is not a bare, canonical `host[:port]` authority — one WHATWG parsing reads back exactly as written — fails the plugin load loudly: parsing would otherwise quietly authorize the hostname inside `harness.internal/path`, or broaden a dangling-colon or zero-padded port to an any-port grant. HTTP failures answer plain 403 before any RPC dispatch; upgrade failures reject the handshake before any event stream starts. Non-loopback compositions must trust their serving authorities explicitly: the Web runtime derives LAN IP literals from an all-interfaces server config, while `trustedHosts` in cordis.yml and the CLI's `--trusted-host` flag declare named authorities. `dsh web --host 0.0.0.0` binds all interfaces for LAN access (the LAN URL is printed at startup); the derived LAN IP literals are automatically added to the /api trust fence, and --trusted-host extends the set explicitly. The fence is a reachability policy, not authentication; the Web carrier provides no authentication layer. Decision record: [the api browser-trust boundary Agent Note](../../../.agents/notes/implemented/architecture/2026-07-28-api-browser-trust-boundary.md).
+ 
+ ## `/api` WebSocket downlinks
+ 
+diff --git a/packages/client/connection/README.zh.md b/packages/client/connection/README.zh.md
+index b529eeb..7cca4a1 100644
+--- a/packages/client/connection/README.zh.md
++++ b/packages/client/connection/README.zh.md
+@@ -6,7 +6,7 @@
+ 
+ ## /api 浏览器信任栅栏
+ 
+-node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-request-trust.ts`）。每个请求——无论是否带浏览器标记——`Host` 都必须是回环地址权威，或与某个 `trustedHosts` 条目匹配：带端口的 `host:port` 条目精确匹配，不带端口的条目匹配任意端口，两侧均经 WHATWG 归一化后比较（DNS rebinding 防御）。刻意不为无浏览器标记的 HTTP 请求开捷径：明文 HTTP 下浏览器的图片与导航读取既不带 `Origin` 也不带 Fetch-Metadata，因此无标记请求仍可能是被重绑页面发起的、响应可被读走的读取，而 Host 是重绑唯一伪造不了的请求头；WebSocket 浏览器握手会带 `Origin` 并通过同一道比较。非浏览器客户端经由回环地址、部署推导的 LAN IP 字面量或已声明的权威通过同一道栅栏。当标记存在时，如附带 `Origin`，则它必须与 Host 权威完全一致；显式的 `sec-fetch-site: cross-site` 标记一律拒绝。不是纯的、规范形 `host[:port]` 权威的 `trustedHosts` 条目——即 WHATWG 解析读回后与原文不完全一致的——会让插件加载明确报错：否则解析会悄悄授权 `harness.internal/path` 这类笔误里的 hostname，或把悬空冒号、补零端口放大成任意端口授权。HTTP 失败在任何 RPC 分发之前以纯 403 应答，upgrade 失败在启动任何事件流前拒绝握手。非回环组合必须显式信任其服务权威：Web 运行时从全接口服务器配置推导 LAN IP 字面量，cordis.yml 中的 `trustedHosts` 与 CLI（命令行界面）的 `--trusted-host` flag 则声明具名权威。`dsh web --host 0.0.0.0` 在远程访问具备认证层之前有意不受支持。这道栅栏是可达性策略，而不是认证；Web 载体不提供认证层。决策记录：[api 浏览器信任边界 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-28-api-browser-trust-boundary.md)。
++node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-request-trust.ts`）。每个请求——无论是否带浏览器标记——`Host` 都必须是回环地址权威，或与某个 `trustedHosts` 条目匹配：带端口的 `host:port` 条目精确匹配，不带端口的条目匹配任意端口，两侧均经 WHATWG 归一化后比较（DNS rebinding 防御）。刻意不为无浏览器标记的 HTTP 请求开捷径：明文 HTTP 下浏览器的图片与导航读取既不带 `Origin` 也不带 Fetch-Metadata，因此无标记请求仍可能是被重绑页面发起的、响应可被读走的读取，而 Host 是重绑唯一伪造不了的请求头；WebSocket 浏览器握手会带 `Origin` 并通过同一道比较。非浏览器客户端经由回环地址、部署推导的 LAN IP 字面量或已声明的权威通过同一道栅栏。当标记存在时，如附带 `Origin`，则它必须与 Host 权威完全一致；显式的 `sec-fetch-site: cross-site` 标记一律拒绝。不是纯的、规范形 `host[:port]` 权威的 `trustedHosts` 条目——即 WHATWG 解析读回后与原文不完全一致的——会让插件加载明确报错：否则解析会悄悄授权 `harness.internal/path` 这类笔误里的 hostname，或把悬空冒号、补零端口放大成任意端口授权。HTTP 失败在任何 RPC 分发之前以纯 403 应答，upgrade 失败在启动任何事件流前拒绝握手。非回环组合必须显式信任其服务权威：Web 运行时从全接口服务器配置推导 LAN IP 字面量，cordis.yml 中的 `trustedHosts` 与 CLI（命令行界面）的 `--trusted-host` flag 则声明具名权威。`dsh web --host 0.0.0.0` 可绑定所有网络接口以实现局域网访问（启动时会打印局域网 URL），推导出的 LAN IP 字面量会自动加入 `/api` 信任栅栏，`--trusted-host` 则显式扩展该集合。这道栅栏是可达性策略，而不是认证；Web 载体不提供认证层。决策记录：[api 浏览器信任边界 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-28-api-browser-trust-boundary.md)。
+ 
+ ## `/api` WebSocket 下行
+ 
+diff --git a/packages/client/connection/src/index.ts b/packages/client/connection/src/index.ts
+index 3508491..63a4b53 100644
+--- a/packages/client/connection/src/index.ts
++++ b/packages/client/connection/src/index.ts
+@@ -144,7 +144,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
+         : undefined
+       if (method !== undefined
+         && PRIVILEGED_METHODS.has(method)
+-        && !isTrustedApiRequest(request, [])) {
++        && !isTrustedApiRequest(request, trustedHosts)) {
+         return new Response('forbidden', { status: 403 })
+       }
+       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {
+diff --git a/packages/client/locale/src/client/LanguageRow.module.css b/packages/client/locale/src/client/LanguageRow.module.css
+index 57d975d..12c40a2 100644
+--- a/packages/client/locale/src/client/LanguageRow.module.css
++++ b/packages/client/locale/src/client/LanguageRow.module.css
+@@ -9,6 +9,13 @@
+   border-bottom: 1px solid var(--dsw-alias-border-l2);
+ }
+ 
++@media (max-width: 768px) {
++  .row {
++    flex-wrap: wrap;
++    gap: 4px;
++  }
++}
++
+ .rowText {
+   flex: 1;
+   min-width: 0;
+@@ -18,6 +25,12 @@
+   padding-right: 48px;
+ }
+ 
++@media (max-width: 768px) {
++  .rowText {
++    padding-right: 0;
++  }
++}
++
+ .title {
+   font-size: 14px;
+   font-weight: 400;
+diff --git a/packages/client/runtime/src/client/sessions/session.ts b/packages/client/runtime/src/client/sessions/session.ts
+index 3e5ec5a..afaf0c3 100644
+--- a/packages/client/runtime/src/client/sessions/session.ts
++++ b/packages/client/runtime/src/client/sessions/session.ts
+@@ -427,9 +427,14 @@ export class Session implements SessionFace {
+     this.events = []
+     this.views = []
+     this.baseSeq = 0
+-    // Superseded, not settled: the baseline replay re-sends still-pending requested frames verbatim
+-    // (same rpcId), re-minting fresh waits; a stale reference's respond() still reaches the host.
+-    this.pending.clear()
++    // Superseded, not settled: the baseline replay re-sends still-pending requested frames
++    // verbatim (same rpcId), re-minting fresh waits that REPLACE these by key; a stale
++    // reference's respond() still reaches the host. The waits stay mounted through the
++    // rebuild so a reconnect never dismisses a question the user has not answered —
++    // the replay's mint replaces the same key, and a resolved frame settles it regardless.
++    // (This matches the uninstantiated manager buffer, which already preserves answerable
++    // frames across generations.) The pending rev still bumps so the snapshot cache
++    // rebuilds once the replay lands.
+     this.pendingRev++
+     this.subscribedLastSeq = null
+     this.liveBuffer = []
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css b/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css
+index 0a8d2fa..fc3ba2a 100644
+--- a/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css
++++ b/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css
+@@ -53,6 +53,13 @@
+   gap: 12px;
+ }
+ 
++@media (max-width: 768px) {
++  .cards {
++    grid-template-columns: 1fr;
++    gap: 8px;
++  }
++}
++
+ .card {
+   border: 1px solid var(--dsw-alias-border-l2);
+   border-radius: 12px;
+@@ -196,6 +203,12 @@
+   border-top: 1px solid var(--dsw-alias-border-l2);
+ }
+ 
++@media (max-width: 768px) {
++  .cardHead {
++    flex-wrap: wrap;
++  }
++}
++
+ /* Icon-only actions: the label rides `title` so the row stays quiet until
+    someone reaches for it. */
+ .iconButton {
+diff --git a/packages/client/ui-conversation/src/client/chat/AssistantMarkdown.module.css b/packages/client/ui-conversation/src/client/chat/AssistantMarkdown.module.css
+index 8fdba2b..b3749e6 100644
+--- a/packages/client/ui-conversation/src/client/chat/AssistantMarkdown.module.css
++++ b/packages/client/ui-conversation/src/client/chat/AssistantMarkdown.module.css
+@@ -11,6 +11,13 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++@media (max-width: 768px) {
++  .root {
++    font-size: 14px;
++    line-height: 24px;
++  }
++}
++
+ .body {
+   display: flex;
+   flex-direction: column;
+diff --git a/packages/client/ui-conversation/src/client/chat/MessageItem.module.css b/packages/client/ui-conversation/src/client/chat/MessageItem.module.css
+index 36824d2..f275f28 100644
+--- a/packages/client/ui-conversation/src/client/chat/MessageItem.module.css
++++ b/packages/client/ui-conversation/src/client/chat/MessageItem.module.css
+@@ -28,6 +28,14 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++@media (max-width: 768px) {
++  .bubble {
++    font-size: 14px;
++    line-height: 20px;
++    padding: 8px 12px;
++  }
++}
++
+ .contextRow {
+   padding: 2px 0;
+ }
+diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
+index c9b6f65..e94f2da 100644
+--- a/packages/client/ui-conversation/src/client/locales.ts
++++ b/packages/client/ui-conversation/src/client/locales.ts
+@@ -140,6 +140,7 @@ export const zh = {
+   'approval.allowOnce': '允许一次',
+   'ask.rowTitle': '提问',
+   'ask.waiting': '等待回答',
++  'ask.restore': '恢复待答选择',
+   'ask.cancelled': '已取消',
+   'ask.interrupted': '已中断',
+   'ask.answered': '{answered}/{total} 已回答',
+@@ -309,6 +310,7 @@ export const en = {
+   'approval.allowOnce': 'Allow once',
+   'ask.rowTitle': 'Ask question',
+   'ask.waiting': 'waiting',
++  'ask.restore': 'Restore pending prompt',
+   'ask.cancelled': 'cancelled',
+   'ask.interrupted': 'interrupted',
+   'ask.answered': '{answered}/{total} answered',
+diff --git a/packages/client/ui-conversation/src/client/service.ts b/packages/client/ui-conversation/src/client/service.ts
+index 198eee5..28965e4 100644
+--- a/packages/client/ui-conversation/src/client/service.ts
++++ b/packages/client/ui-conversation/src/client/service.ts
+@@ -62,12 +62,23 @@ export interface IConversation {
+ function browserDraftAttachment(file: File): ComposerAttachment {
+   return {
+     kind: 'image',
+-    id: crypto.randomUUID() as DraftAttachmentId,
++    // crypto.randomUUID() is unavailable on insecure origins (HTTP over LAN IP).
++    // Use crypto.getRandomValues() which all major browsers expose everywhere.
++    id: safeUuid() as DraftAttachmentId,
+     previewUrl: URL.createObjectURL(file),
+     file,
+   }
+ }
+ 
++/** RFC 4122 v4 UUID backed by crypto.getRandomValues() — works on insecure origins. */
++function safeUuid(): string {
++  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
++  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40
++  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80
++  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
++  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
++}
++
+ interface ImageUrlEntry {
+   readonly sessionId: SessionId
+   readonly generation: number
+diff --git a/packages/client/ui-conversation/src/client/settings/EnterBehaviorRow.module.css b/packages/client/ui-conversation/src/client/settings/EnterBehaviorRow.module.css
+index 9d8b3d7..c93ba2b 100644
+--- a/packages/client/ui-conversation/src/client/settings/EnterBehaviorRow.module.css
++++ b/packages/client/ui-conversation/src/client/settings/EnterBehaviorRow.module.css
+@@ -8,6 +8,13 @@
+   border-bottom: 1px solid var(--dsw-alias-border-l2);
+ }
+ 
++@media (max-width: 768px) {
++  .row {
++    flex-wrap: wrap;
++    gap: 4px;
++  }
++}
++
+ .rowText {
+   flex: 1;
+   min-width: 0;
+@@ -17,6 +24,12 @@
+   padding-right: 48px;
+ }
+ 
++@media (max-width: 768px) {
++  .rowText {
++    padding-right: 0;
++  }
++}
++
+ .title {
+   font-size: 14px;
+   font-weight: 400;
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css
+index 6146d42..a8088ed 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css
+@@ -25,6 +25,41 @@
+   --dsh-composer-dock-inset: 8px;
+ }
+ 
++/* Mobile: tighten the side clearance so the message column and composer use
++   the full narrow viewport (the shared width axis keeps them aligned). The
++   748px content cap is a cap, not a floor — it never constrains a phone.
++   Smaller font sizes for phone readability. */
++@media (max-width: 767px) {
++  .root {
++    --dsh-composer-side-clearance: 12px;
++    --dsw-font-markdown-base: 14px/24px var(--dsw-font-family);
++    --dsw-font-markdown-base-font-size: 14px;
++    --dsw-font-markdown-base-line-height: 24px;
++    --dsw-font-markdown-base-strong: 600 14px/24px var(--dsw-font-family);
++    --dsw-font-markdown-base-strong-font-size: 14px;
++    --dsw-font-markdown-base-strong-line-height: 24px;
++    --dsw-font-markdown-base-italic: italic 14px/24px var(--dsw-font-family);
++    --dsw-font-markdown-base-italic-font-size: 14px;
++    --dsw-font-markdown-base-italic-line-height: 24px;
++    --dsw-font-markdown-h1: 700 20px/28px var(--dsw-font-family);
++    --dsw-font-markdown-h1-font-size: 20px;
++    --dsw-font-markdown-h1-line-height: 28px;
++    --dsw-font-markdown-h2: 700 18px/26px var(--dsw-font-family);
++    --dsw-font-markdown-h2-font-size: 18px;
++    --dsw-font-markdown-h2-line-height: 26px;
++    --dsw-font-markdown-h3: 700 16px/24px var(--dsw-font-family);
++    --dsw-font-markdown-h3-font-size: 16px;
++    --dsw-font-markdown-h3-line-height: 24px;
++    --dsw-font-markdown-h4: 600 14px/24px var(--dsw-font-family);
++    --dsw-font-markdown-h4-font-size: 14px;
++    --dsw-font-markdown-h4-line-height: 24px;
++  }
++
++  .composerSeat {
++    padding-bottom: env(safe-area-inset-bottom, 0px);
++  }
++}
++
+ .header {
+   position: relative;
+   flex: none;
+@@ -32,6 +67,14 @@
+   border-bottom: 1px solid transparent;
+ }
+ 
++/* Mobile header leaves room for the floating menu button (40px button + 12px
++   margin = 52px). Matches ui-layout's MOBILE_BREAKPOINT = 768px. */
++@media (max-width: 767px) {
++  .header {
++    padding: 12px 16px 0 60px;
++  }
++}
++
+ .header::after {
+   content: '';
+   position: absolute;
+@@ -228,6 +271,7 @@
+   flex-direction: column;
+   min-height: 0;
+   overflow-y: auto;
++  overscroll-behavior: contain;
+   /* The column scrolls on ONE axis. Stating `hidden` rather than leaving the
+      initial `visible` is what removes the horizontal bar: a box that scrolls in
+      one axis computes `visible` to `auto` in the other, so any bleed becomes
+@@ -363,3 +407,40 @@
+ .root[data-phase='settling'] .composerSeat {
+   visibility: hidden;
+ }
++
++/* Floating restore chip for a pending-question/approval takeover whose sticky
++   seat has left the visible region (mobile keyboard cover, a sticky glitch, or
++   scroll-away). Mirrors the back-to-bottom floating control's capsule look but
++   sits above the soft keyboard: --dsh-keyboard-gap is published by
++   ConversationRoot's visibility effect from the visual viewport, so the chip
++   floats at layout-bottom + keyboard-height (the real visible bottom) on
++   mobile and at the plain bottom on desktop. z-index 9 clears the sticky
++   composer (7) and the back-to-bottom control (8). */
++.restoreChip {
++  position: fixed;
++  right: 16px;
++  bottom: calc(var(--dsh-keyboard-gap, 0px) + env(safe-area-inset-bottom, 0px) + 16px);
++  z-index: 9;
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  height: 34px;
++  padding: 0 14px 0 10px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-button-floating-fill);
++  box-shadow: var(--dsw-shadow-lv2);
++  color: var(--dsw-alias-label-primary);
++  font-size: 13px;
++  line-height: 18px;
++  font-weight: 500;
++  cursor: pointer;
++}
++
++.restoreChip:hover {
++  background: var(--dsw-alias-button-floating-hover);
++}
++
++.restoreChip > svg {
++  color: var(--dsw-alias-state-business-primary);
++}
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+index ef1221c..d80da96 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+@@ -5,6 +5,7 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import clsx from 'clsx'
+ import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
++import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ConversationSlotProps, InputZone } from '../contract/slots.ts'
+ import { HeroGlow, HeroShell, WorkspaceChip, workspaceLabel } from './EmptyHero.tsx'
+ import css from './ConversationRoot.module.css'
+@@ -32,12 +33,24 @@ export function ConversationRoot({
+   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<WorkspaceId | undefined>()
+   const pickerAnchor = useRef<HTMLButtonElement>(null)
+ 
++  // The composer seat element, captured by the height-publishing callback
++  // ref below so the pending-restore observer can read it without a second
++  // ref-binding pass. Stable across renders (ref assignment is a side effect,
++  // not a re-render trigger).
++  const seatRef = useRef<HTMLDivElement | null>(null)
++  // The scroll body and root element refs feed the pending-restore visibility
++  // check (bounds of the seat vs the visible region) and carry the
++  // --dsh-keyboard-gap custom property the fixed restore control reads.
++  const scrollBodyRef = useRef<HTMLDivElement | null>(null)
++  const rootRef = useRef<HTMLDivElement | null>(null)
++
+   // Publishes the seat's live height as --dsh-composer-height on the scroll
+   // body so floating controls (ChatView back-to-bottom) clear the composer as
+   // it grows. Callback ref, not an effect; stable identity prevents observer
+   // churn while the first blank session fills the resident body outlet.
+   const seatObserver = useRef<ResizeObserver | null>(null)
+   const seatResizeRef = useCallback((seat: HTMLDivElement | null): void => {
++    seatRef.current = seat
+     seatObserver.current?.disconnect()
+     seatObserver.current = null
+     const scroller = seat?.parentElement ?? null
+@@ -65,6 +78,58 @@ export function ConversationRoot({
+     }
+   }, [pendingWorkspaceId, sessionWorkspace?.workspaceId, workspaces.phase, pendingWorkspace])
+ 
++  // A pending question or approval wait elects a composer-takeover panel
++  // (QuestionComposer / ApprovalPanel), replacing the InputBar. On mobile the
++  // sticky seat can slip behind the soft keyboard or scroll out of reach, and
++  // geometry-based "is it visible" detection cannot be trusted there (a sticky
++  // glitch or a keyboard cover leaves the seat box in-bounds while the panel is
++  // visually gone). So while a takeover is pending the restore chip is always
++  // mounted — a guaranteed, reachable recovery entry — and its fixed offset
++  // tracks the visual viewport so it floats above a soft keyboard.
++  const hasPendingTakeover = pending.some(i => i.kind === 'question' || i.kind === 'approval')
++  useEffect(() => {
++    if (!hasPendingTakeover) return
++    const root = rootRef.current
++    if (root === null) return
++    // Publish the keyboard gap (layout viewport bottom − visual viewport
++    // bottom) so the fixed restore chip floats above the keyboard, not behind
++    // it. Recompute on visual-viewport resize/scroll and once initially.
++    const recheck = (): void => {
++      const vv = window.visualViewport
++      const gap = vv != null ? Math.max(0, window.innerHeight - vv.offsetTop - vv.height) : 0
++      root.style.setProperty('--dsh-keyboard-gap', `${gap}px`)
++    }
++    recheck()
++    const vv = window.visualViewport
++    vv?.addEventListener('resize', recheck)
++    vv?.addEventListener('scroll', recheck)
++    return () => {
++      vv?.removeEventListener('resize', recheck)
++      vv?.removeEventListener('scroll', recheck)
++    }
++  }, [hasPendingTakeover])
++
++  const restorePendingSeat = (): void => {
++    // Dismiss the soft keyboard first: a focused input inside the sticky seat
++    // is what hides it behind the keyboard on mobile, so blurring the active
++    // element restores the layout viewport. Then align the seat to the
++    // scrollport's visible edge for the scroll-away / sticky-glitch case.
++    const active = document.activeElement
++    if (active instanceof HTMLElement && active !== document.body) active.blur()
++    const seat = seatRef.current
++    const scroll = scrollBodyRef.current
++    if (seat === null || scroll === null) return
++    requestAnimationFrame(() => {
++      const seatRect = seat.getBoundingClientRect()
++      const scrollRect = scroll.getBoundingClientRect()
++      if (seatRect.bottom > scrollRect.bottom - 1) {
++        scroll.scrollTop += seatRect.bottom - scrollRect.bottom + 8
++      } else if (seatRect.top < scrollRect.top + 1) {
++        scroll.scrollTop -= scrollRect.top - seatRect.top + 8
++      }
++    })
++  }
++
+   // While a session is still replaying (loading + blank) the hero/docked
+   // choice is unknowable — render the composer hidden instead of flashing
+   // the centered hero and snapping to the docked bar (or vice versa).
+@@ -184,12 +249,23 @@ export function ConversationRoot({
+   )
+ 
+   return (
+-    <div className={css.root} data-phase={phase}>
++    <div ref={rootRef} className={css.root} data-phase={phase}>
+       {renderSlot('conversation.session.header', {})}
+-      <div className={css.scrollBody} data-conversation-scroll="">
++      <div ref={scrollBodyRef} className={css.scrollBody} data-conversation-scroll="">
+         {renderSlot('conversation.session', {})}
+         {composerSeat}
+       </div>
++      {hasPendingTakeover && (
++        <button
++          type="button"
++          className={css.restoreChip}
++          aria-label={t('ask.restore')}
++          onClick={restorePendingSeat}
++        >
++          <IconChevronDownOutline14 />
++          <span>{t('ask.waiting')}</span>
++        </button>
++      )}
+     </div>
+   )
+ }
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+index 6a2eb5f..e6fa1b1 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+@@ -410,6 +410,26 @@
+   cursor: default;
+ }
+ 
++/* Mobile: enlarge touch targets for the primary send and attach buttons.
++   Matches ui-layout's MOBILE_BREAKPOINT = 768px.
++   Smaller card font for phone readability. */
++@media (max-width: 767px) {
++  .card {
++    font-size: 14px;
++    line-height: 20px;
++  }
++
++  .primary {
++    width: 44px;
++    height: 44px;
++  }
++
++  .add {
++    width: 36px;
++    height: 36px;
++  }
++}
++
+ .retry {
+   margin-left: 8px;
+   padding: 1px 8px;
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+index 9585677..bcc2dcf 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+@@ -212,9 +212,13 @@ export function InputBar({
+   // offset while the value swap puts the caret at the new draft's end, which is
+   // off screen (measured on all three engines: offset 0 with the caret 940px
+   // down). Suppress the walk, then reveal in our own box.
++  // On mobile (viewport < 768px), skip auto-focus to avoid popping up the
++  // keyboard, which would cover the just-switched conversation and confuse
++  // the user. The user can tap the textarea when they intend to type.
+   useEffect(() => {
+     const el = inputRef.current
+     if (locked || el === null) return
++    if (window.innerWidth < 768) return
+     el.focus({ preventScroll: true })
+     revealSelectionFocus(el)
+   }, [locked, sessionId])
+diff --git a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
+index acf618f..2f4bf76 100644
+--- a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
+@@ -440,6 +440,66 @@ describe('ConversationRoot resident composer', () => {
+     expect(b.view.getByRole('textbox')).toBeTruthy()
+   })
+ 
++  it('always mounts a restore chip while a pending takeover is active (guaranteed recovery entry)', () => {
++    const b = mount(
++      conversationSnapshot({ pending: [{ kind: 'question' } as never] }),
++      undefined, undefined, { overlayTakeover: true },
++    )
++    // The chip is always mounted while a takeover is pending — geometry-
++    // based visibility detection cannot be trusted on mobile (sticky glitch,
++    // keyboard cover), so the recovery entry must not depend on it.
++    expect(b.view.getByRole('button', { name: '恢复待答选择' })).toBeTruthy()
++  })
++
++  it('publishes the keyboard gap so the restore chip floats above a soft keyboard', () => {
++    const vvListeners = { resize: [] as (() => void)[], scroll: [] as (() => void)[] }
++    const fakeVV = {
++      // Layout viewport is 800 tall; the keyboard shrinks the visual viewport
++      // to 500 — the restore chip must offset 300px above the layout bottom.
++      offsetTop: 0,
++      height: 500,
++      addEventListener: (_ev: string, fn: () => void) => { vvListeners[_ev as 'resize' | 'scroll'].push(fn) },
++      removeEventListener: () => {},
++    }
++    vi.stubGlobal('visualViewport', fakeVV)
++    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true })
++    const b = mount(
++      conversationSnapshot({ pending: [{ kind: 'question' } as never] }),
++      undefined, undefined, { overlayTakeover: true },
++    )
++    act(() => { vvListeners.resize[0]?.() })
++    expect(b.view.getByRole('button', { name: '恢复待答选择' })).toBeTruthy()
++    const root = b.view.container.querySelector('[data-phase]') as HTMLElement
++    expect(root.style.getPropertyValue('--dsh-keyboard-gap')).toBe('300px')
++    vi.unstubAllGlobals()
++  })
++
++  it('realigns the seat to the visible edge when the restore chip is clicked', async () => {
++    const b = mount(
++      conversationSnapshot({ pending: [{ kind: 'question' } as never] }),
++      undefined, undefined, { overlayTakeover: true },
++    )
++    const chip = b.view.getByRole('button', { name: '恢复待答选择' })
++    const seat = b.view.container.querySelector('[data-composer-seat]') as HTMLElement
++    const scroll = b.view.container.querySelector('[data-conversation-scroll]') as HTMLElement
++    // The sticky seat has slipped below the scrollport's visible bottom —
++    // the mobile keyboard-cover / sticky-glitch shape the chip exists for.
++    vi.spyOn(seat, 'getBoundingClientRect').mockImplementation(
++      () => ({ top: 500, bottom: 600 } as DOMRect),
++    )
++    vi.spyOn(scroll, 'getBoundingClientRect').mockImplementation(
++      () => ({ top: 0, bottom: 400 } as DOMRect),
++    )
++    // Clicking the chip realigns the seat to the visible edge: the seat
++    // bottom (600) over the scroll bottom (400) produces a +208 scrollTop
++    // delta (600 − 400 + 8) once the post-blur frame fires.
++    await act(async () => {
++      fireEvent.click(chip)
++      await new Promise(resolve => { requestAnimationFrame(() => { resolve(null) }) })
++    })
++    expect(scroll.scrollTop).toBe(208)
++  })
++
+   it('keeps the Chat fallback selected by id when a view is inserted before it', () => {
+     const viewTabs: ViewTab[] = [
+       { id: 'chat', label: 'Chat' },
+diff --git a/packages/client/ui-layout/src/client/AppFrame.module.css b/packages/client/ui-layout/src/client/AppFrame.module.css
+index ae56780..be6d318 100644
+--- a/packages/client/ui-layout/src/client/AppFrame.module.css
++++ b/packages/client/ui-layout/src/client/AppFrame.module.css
+@@ -48,6 +48,106 @@
+   border-left: none;
+ }
+ 
++/* ── mobile layout: sidebar drawer + full-screen details slide-over ──────────
++   Below MOBILE_BREAKPOINT the grid keeps a single center track
++   (`sidebar: 0 details: 0` inline); the sidebar and details columns are
++   absolutely positioned overlays riding the frame box. The sidebar drawer is
++   an off-canvas panel that translates in/out; the details column slides in
++   from the right at full width. The overlay z-stack (low → high): menuButton
++   (9), drawerBackdrop (18), drawer sidebar (19), details slide-over (21) —
++   shell.overlay (20, AppFrame data-shell-overlay) stays above the drawer so
++   system overlays still paint over it but below an open details panel. */
++
++/* Off-canvas drawer seat: full-height, left-anchored at its fixed width. */
++.frame[data-mobile] .sidebarCol {
++  position: absolute;
++  top: 0;
++  bottom: 0;
++  left: 0;
++  z-index: 19;
++  border-right: 1px solid var(--dsw-alias-border-l1);
++  box-shadow: var(--dsw-shadow-lv3);
++  transform: translateX(-100%);
++  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
++}
++
++.frame[data-mobile] .sidebarCol::after {
++  content: '';
++  display: block;
++  height: env(safe-area-inset-bottom, 0px);
++}
++
++.frame[data-mobile][data-drawer-open] .sidebarCol {
++  transform: translateX(0);
++}
++
++/* Details becomes a full-width slide-over while a call is selected (details
++   col is transparent when no material is open — the panel's own chrome fills
++   it). */
++.frame[data-mobile] .detailsCol {
++  position: absolute;
++  inset: 0;
++  z-index: 21;
++  border-left: none;
++  background: var(--dsw-alias-bg-base);
++  transform: translateX(100%);
++  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
++}
++
++.frame[data-mobile][data-details-open] .detailsCol {
++  transform: translateX(0);
++}
++
++/* Floating menu button: the only always-visible drawer opener on phones;
++   floats above the conversation header without participating in its layout. */
++.menuButton {
++  position: absolute;
++  top: calc(12px + env(safe-area-inset-top, 0px));
++  left: 12px;
++  z-index: 9;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  width: 40px;
++  height: 40px;
++  padding: 0;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 12px;
++  background: var(--dsw-alias-button-floating-fill);
++  color: var(--dsw-alias-label-primary);
++  box-shadow: var(--dsw-shadow-lv2);
++  cursor: pointer;
++}
++
++.menuButton:hover {
++  background: var(--dsw-alias-button-floating-hover);
++}
++
++/* Drawer backdrop: dims and blocks the conversation while the drawer is open. */
++.drawerBackdrop {
++  position: absolute;
++  inset: 0;
++  z-index: 18;
++  border: none;
++  padding: 0;
++  background: color-mix(in srgb, var(--dsw-alias-label-primary) 24%, transparent);
++  cursor: pointer;
++  animation: dsh-backdrop-in 200ms var(--ds-ease-in-out);
++}
++
++@keyframes dsh-backdrop-in {
++  from { opacity: 0; }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .frame[data-mobile] .sidebarCol,
++  .frame[data-mobile] .detailsCol,
++  .drawerBackdrop {
++    transition: none;
++    animation: none;
++  }
++}
++
+ /* Drag handles are frame children (columns clip overflow): an 8px hit strip
+    centered on the column border via inline left, above column content. Details
+    adds a visible 12x32 pill at vertical center; sidebar keeps only the hit strip. */
+diff --git a/packages/client/ui-layout/src/client/AppFrame.tsx b/packages/client/ui-layout/src/client/AppFrame.tsx
+index 2696dc9..cb60542 100644
+--- a/packages/client/ui-layout/src/client/AppFrame.tsx
++++ b/packages/client/ui-layout/src/client/AppFrame.tsx
+@@ -9,11 +9,20 @@
+  * entries retain identity. Pure component: everything arrives
+  * through the three framework shares — zero cordis or framework imports,
+  * zero self-made hooks.
++ *
++ * Below MOBILE_BREAKPOINT the frame becomes a phone layout: the sidebar is an
++ * off-canvas drawer (0 grid width, absolutely positioned, opened by the
++ * floating menu button or the store's narrowExpanded override) and the
++ * details column is a full-screen slide-over; the center column uses the full
++ * viewport width. Above that breakpoint the desktop three-column behavior is
++ * unchanged.
+  */
+ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+ import type { ReactNode } from 'react'
+ import type { PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+-import { computeColumns, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT } from './columns.ts'
++import {
++  computeColumns, MOBILE_BREAKPOINT, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT,
++} from './columns.ts'
+ import type { createLayoutStore } from './stores.ts'
+ import css from './AppFrame.module.css'
+ 
+@@ -23,6 +32,10 @@ export type AppFrameProps =
+   & PropsRenderSlots<'sidebar' | 'conversation' | 'details' | 'shell.overlay'>
+   & PropsStore<ReturnType<typeof createLayoutStore>>
+ 
++/** Mobile sidebar drawer width: 85% of the viewport, capped to the desktop
++ * default 320px feel so the rail geometry stays legible on large phones. */
++const MOBILE_DRAWER_WIDTH = (viewport: number): number => Math.min(320, Math.round(viewport * 0.85))
++
+ /** Center column grid item (session-body building block). */
+ function CenterColumn(props: { children?: ReactNode }) {
+   return <div className={css.centerCol}>{props.children}</div>
+@@ -132,14 +145,40 @@ export function AppFrame({
+   // re-expand override, stores.ts). Collapsed is decided here, so the
+   // solver stays breakpoint-free: a narrow re-expand passes the preference
+   // (or the default when the wide preference is closed) and the center
+-  // absorbs the squeeze.
++  // absorbs the squeeze. Below MOBILE_BREAKPOINT the sidebar never opens a
++  // grid track — the drawer rides the same narrowExpanded override.
+   const narrow = viewport < SIDEBAR_AUTO_COLLAPSE
++  const mobile = viewport < MOBILE_BREAKPOINT
+   useEffect(() => { actions.setNarrow(narrow) }, [actions, narrow])
+-  const sidebarCollapsed = narrow ? !panels.narrowExpanded : panels.sidebar === 0
++
++  // Mobile: close the sidebar drawer automatically when the user selects a
++  // different session. This avoids requiring the user to manually close the
++  // drawer after tapping a history record, and prevents the ongoing session
++  // switch from triggering the InputBar auto-focus (which would pop up the
++  // keyboard) while the drawer close animation is still running.
++  const currentSession = useSessions(s => s.current)
++  const lastCurrentSession = useRef(currentSession)
++  useEffect(() => {
++    if (!mobile || currentSession === undefined) return
++    if (lastCurrentSession.current !== undefined && currentSession !== lastCurrentSession.current) {
++      if (panels.narrowExpanded) actions.toggleSidebar()
++    }
++    lastCurrentSession.current = currentSession
++  }, [mobile, currentSession, actions, panels.narrowExpanded])
++  const drawerOpen = mobile && panels.narrowExpanded
++  const sidebarCollapsed = mobile
++    ? !drawerOpen
++    : narrow ? !panels.narrowExpanded : panels.sidebar === 0
+   const sidebarPreference = sidebarCollapsed
+     ? 0
+     : panels.sidebar === 0 ? SIDEBAR_DEFAULT : panels.sidebar
+-  const cols = computeColumns(viewport, sidebarPreference, detailsSession === undefined ? 0 : panels.details)
++  const detailsOpen = detailsSession !== undefined && panels.details > 0
++  // On mobile both rails are overlays: the grid tracks collapse to zero and
++  // the center uses the full viewport (the drawer/slide-over are positioned
++  // absolutely, so no track width is owed to them).
++  const cols = mobile
++    ? { sidebar: 0, center: viewport, details: 0 }
++    : computeColumns(viewport, sidebarPreference, detailsOpen ? panels.details : 0)
+   const colsRef = useRef(cols)
+   colsRef.current = cols
+ 
+@@ -161,24 +200,33 @@ export function AppFrame({
+     actions.setDetails(detailsBase.current - dx)
+   }, [actions])
+ 
++  const drawerWidth = MOBILE_DRAWER_WIDTH(viewport)
++
+   return (
+     <div
+       ref={frameRef}
+       className={css.frame}
+       style={{ gridTemplateColumns: `${cols.sidebar}px minmax(0, 1fr) ${cols.details}px` }}
+-      data-sidebar-collapsed={sidebarCollapsed || undefined}
+-      data-details-collapsed={cols.details === 0 || undefined}
++      data-mobile={mobile || undefined}
++      data-sidebar-collapsed={(!mobile && sidebarCollapsed) || undefined}
++      data-drawer-open={drawerOpen || undefined}
++      data-details-collapsed={(!mobile && cols.details === 0 && !detailsOpen) || undefined}
++      data-details-open={detailsOpen || undefined}
+       data-dragging={dragging || undefined}
+     >
+-      <div className={css.sidebarCol}>
++      <div
++        className={css.sidebarCol}
++        style={mobile ? { width: drawerWidth } : undefined}
++      >
+         {/* Render-site slot call with live concession output: a closed
+             sidebar keeps the mounted slot at the compact-rail width, and the
+             component sees its rendered state as owner params decided here
+             (collapsed follows the resolved rail, so a derived auto-collapse
+-            renders the rail UI too). */}
++            renders the rail UI too). On mobile the drawer always shows the
++            wide sidebar content — the transform shows/hides the column. */}
+         {renderSlot('sidebar', {
+           collapsed: sidebarCollapsed,
+-          width: cols.sidebar,
++          width: mobile ? drawerWidth : cols.sidebar,
+         })}
+       </div>
+       <>
+@@ -193,9 +241,39 @@ export function AppFrame({
+       <div className={css.overlayLayer} data-shell-overlay>
+         {renderSlot('shell.overlay', {})}
+       </div>
+-      {/* The collapsed rail is fixed-width: no resize handle while closed. */}
+-      {!sidebarCollapsed && <DragHandle side="sidebar" left={cols.sidebar} onStart={onSidebarStart} onDrag={onSidebarDrag} onEnd={onDragEnd} />}
+-      {cols.details > 0 && <DragHandle side="details" left={viewport - cols.details} onStart={onDetailsStart} onDrag={onDetailsDrag} onEnd={onDragEnd} />}
++      {mobile && (
++        <>
++          {/* Floating menu button opens the sidebar drawer from anywhere on
++              the conversation surface (z-index above the header/composer,
++              below the drawer and its backdrop). */}
++          <button
++            type="button"
++            className={css.menuButton}
++            aria-label={drawerOpen ? 'Close menu' : 'Open menu'}
++            aria-expanded={drawerOpen || undefined}
++            onClick={() => { actions.toggleSidebar() }}
++          >
++            <svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
++              <line x1="3" y1="5" x2="15" y2="5" />
++              <line x1="3" y1="9" x2="15" y2="9" />
++              <line x1="3" y1="13" x2="15" y2="13" />
++            </svg>
++          </button>
++          {/* Backdrop closes the drawer; only rendered while it is open. */}
++          {drawerOpen && (
++            <button
++              type="button"
++              className={css.drawerBackdrop}
++              aria-label="Close menu"
++              onClick={() => { actions.toggleSidebar() }}
++            />
++          )}
++        </>
++      )}
++      {/* The collapsed rail is fixed-width: no resize handle while closed.
++          Mobile rails are fixed-width drawers/slide-overs: no handles. */}
++      {!mobile && !sidebarCollapsed && <DragHandle side="sidebar" left={cols.sidebar} onStart={onSidebarStart} onDrag={onSidebarDrag} onEnd={onDragEnd} />}
++      {!mobile && cols.details > 0 && <DragHandle side="details" left={viewport - cols.details} onStart={onDetailsStart} onDrag={onDetailsDrag} onEnd={onDragEnd} />}
+     </div>
+   )
+-}
++}
+\ No newline at end of file
+diff --git a/packages/client/ui-layout/src/client/columns.ts b/packages/client/ui-layout/src/client/columns.ts
+index 374ce64..08b4afb 100644
+--- a/packages/client/ui-layout/src/client/columns.ts
++++ b/packages/client/ui-layout/src/client/columns.ts
+@@ -31,6 +31,12 @@ export const SIDEBAR_COLLAPSED = 56
+  * LG breakpoint); a manual toggle below it re-expands over the squeezed center
+  * (stores.ts narrowExpanded). */
+ export const SIDEBAR_AUTO_COLLAPSE = 1024
++
++/** Viewport width below which the sidebar becomes a full overlay drawer
++ * (0 grid width, absolutely positioned) and the details panel becomes a
++ * full-screen overlay. Below this breakpoint the center column uses the
++ * full viewport width. */
++export const MOBILE_BREAKPOINT = 768
+ /** Details drag clamp floor. */
+ export const DETAILS_MIN = 300
+ /** Details drag clamp ceiling. */
+diff --git a/packages/client/ui-layout/tests/app-frame.client.spec.tsx b/packages/client/ui-layout/tests/app-frame.client.spec.tsx
+index 65de5a6..c547694 100644
+--- a/packages/client/ui-layout/tests/app-frame.client.spec.tsx
++++ b/packages/client/ui-layout/tests/app-frame.client.spec.tsx
+@@ -15,7 +15,7 @@ import { act, cleanup, render } from '@testing-library/react'
+ import { useSyncExternalStore } from 'react'
+ import { AppFrame } from '@deepseek-ai/dsh-client-ui-layout/src/client/AppFrame.tsx'
+ import type { AppFrameProps } from '@deepseek-ai/dsh-client-ui-layout/src/client/AppFrame.tsx'
+-import { SIDEBAR_COLLAPSED } from '@deepseek-ai/dsh-client-ui-layout/src/client/columns.ts'
++import { MOBILE_BREAKPOINT, SIDEBAR_COLLAPSED } from '@deepseek-ai/dsh-client-ui-layout/src/client/columns.ts'
+ import { createLayoutStore } from '@deepseek-ai/dsh-client-ui-layout/src/client/stores.ts'
+ import type {
+   SessionId, SessionListState, WorkspaceListState,
+@@ -328,6 +328,61 @@ describe('AppFrame — narrow-viewport auto-collapse', () => {
+   })
+ })
+ 
++describe('AppFrame — mobile drawer layout', () => {
++  it('mounts with zero-width rails, a full-width center, and the menu button below the breakpoint', () => {
++    frameWidth = MOBILE_BREAKPOINT - 1
++    const { frame, slotCalls, getByRole } = mountFrame()
++    expect(tracks(frame)).toEqual([0, 0])
++    expect(frame.hasAttribute('data-mobile')).toBe(true)
++    expect(frame.hasAttribute('data-sidebar-collapsed')).toBe(false)
++    expect(frame.hasAttribute('data-details-collapsed')).toBe(false)
++    expect(frame.hasAttribute('data-drawer-open')).toBe(false)
++    // The drawer stays mounted (sidebar slot rendered) with the wide content.
++    expect(slotCalls.filter(c => c.key === 'sidebar').at(-1)!.props).toEqual({
++      collapsed: true,
++      width: Math.min(320, Math.round((MOBILE_BREAKPOINT - 1) * 0.85)),
++    })
++    // No drag handles on the fixed-width drawer.
++    expect(frame.querySelectorAll('[class*="handle"]')).toHaveLength(0)
++    expect(getByRole('button', { name: 'Open menu' })).toBeTruthy()
++  })
++
++  it('menu button toggles the drawer and shows the backdrop', () => {
++    frameWidth = MOBILE_BREAKPOINT - 1
++    const { getByRole, frame } = mountFrame()
++    const open = getByRole('button', { name: 'Open menu' })
++    act(() => { open.click() })
++    expect(frame.hasAttribute('data-drawer-open')).toBe(true)
++    // Both the menu button (now "Close menu") and the backdrop share the same
++    // label; query by selector to find the backdrop.
++    const backdrop = document.querySelectorAll('button[class*="drawerBackdrop"]')
++    expect(backdrop).toHaveLength(1)
++    act(() => { (backdrop[0] as HTMLButtonElement).click() })
++    expect(frame.hasAttribute('data-drawer-open')).toBe(false)
++  })
++
++  it('details slides over full-screen while selected, without tracking a grid column', () => {
++    frameWidth = MOBILE_BREAKPOINT - 1
++    const { frame, instance } = mountFrame()
++    act(() => { instance.actions.openDetails() })
++    expect(tracks(frame)).toEqual([0, 0]) // still full-width center underneath
++    expect(frame.hasAttribute('data-details-open')).toBe(true)
++    act(() => { instance.actions.closeDetails() })
++    expect(frame.hasAttribute('data-details-open')).toBe(false)
++  })
++
++  it('crossing the breakpoint restores desktop tracks and removes the menu button', () => {
++    frameWidth = MOBILE_BREAKPOINT - 1
++    const { frame, queryByRole } = mountFrame()
++    expect(frame.hasAttribute('data-mobile')).toBe(true)
++    frameWidth = 1280 // well above both the mobile and narrow breakpoints
++    act(() => { fireResize?.(); vi.advanceTimersByTime(20) })
++    expect(frame.hasAttribute('data-mobile')).toBe(false)
++    expect(queryByRole('button', { name: 'Open menu' })).toBeNull()
++    expect(tracks(frame)).toEqual([280, 0])
++  })
++})
++
+ describe('AppFrame — guard branches', () => {
+   it('pointer moves without capture are ignored (no width write)', () => {
+     const { frame, instance } = mountFrame()
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.module.css b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+index b19242f..fca3d75 100644
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.module.css
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+@@ -26,6 +26,15 @@
+   cursor: pointer;
+ }
+ 
++@media (max-width: 768px) {
++  .trigger {
++    max-width: 160px;
++    font-size: 12px;
++    line-height: 18px;
++    height: 26px;
++  }
++}
++
+ .trigger:hover:not(:disabled) {
+   background: var(--dsw-alias-interactive-bg-hover);
+ }
+@@ -198,6 +207,13 @@
+   white-space: nowrap;
+ }
+ 
++@media (max-width: 768px) {
++  .modelName {
++    font-size: 12px;
++    line-height: 18px;
++  }
++}
++
+ .description {
+   overflow: hidden;
+   color: var(--dsw-alias-label-tertiary);
+diff --git a/packages/client/ui-primitives/src/markdown/MarkdownText.tsx b/packages/client/ui-primitives/src/markdown/MarkdownText.tsx
+index 4dff78d..9de2ae9 100644
+--- a/packages/client/ui-primitives/src/markdown/MarkdownText.tsx
++++ b/packages/client/ui-primitives/src/markdown/MarkdownText.tsx
+@@ -11,7 +11,7 @@
+  * full parse self-heals it.
+  */
+ 
+-import { memo, useMemo, useRef } from 'react'
++import { memo, useMemo, useRef, useSyncExternalStore } from 'react'
+ import type { ReactNode } from 'react'
+ import { IncrementalMarkdownParser } from './incremental.ts'
+ import { parseGfm, parseGfmWithMath } from './parse.ts'
+@@ -20,7 +20,7 @@ import {
+   wrapBlockChildren,
+ } from './render.tsx'
+ import type { MarkdownCodeLabels, MarkdownFileMentions, MarkdownRenderContext, ReferenceTargets } from './render.tsx'
+-import 'katex/dist/katex.min.css'
++import { katexLoadCount, subscribeKatexLoaded } from './katex.tsx'
+ import css from './MarkdownText.module.css'
+ 
+ export type { MarkdownCodeLabels, MarkdownFileMentions } from './render.tsx'
+@@ -159,6 +159,12 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
+   codeLabels?: MarkdownCodeLabels | undefined
+   fileMentions?: MarkdownFileMentions | undefined
+ }) {
++  // Re-render when KaTeX finishes loading on demand: a settled math node
++  // renders the literal-TeX placeholder until the dynamic import resolves,
++  // then this subscription flips the count and `useMemo` rebuilds the blocks
++  // with the full KaTeX DOM. Streaming never parses math, so this hook is a
++  // no-op for streaming renders (the count never moves).
++  const katexCount = useSyncExternalStore(subscribeKatexLoaded, katexLoadCount)
+   const streamRef = useRef<StreamingRenderer | null>(null)
+   const streamLabelsRef = useRef<MarkdownCodeLabels | undefined>(codeLabels)
+   const children = useMemo(() => {
+@@ -171,6 +177,6 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
+       streamLabelsRef.current = codeLabels
+     }
+     return streamRef.current.render(text)
+-  }, [text, streaming, codeLabels, fileMentions])
++  }, [text, streaming, codeLabels, fileMentions, katexCount])
+   return <div className={css.markdown}>{children}</div>
+ })
+diff --git a/packages/client/ui-primitives/src/markdown/katex.tsx b/packages/client/ui-primitives/src/markdown/katex.tsx
+index 45c1226..743af36 100644
+--- a/packages/client/ui-primitives/src/markdown/katex.tsx
++++ b/packages/client/ui-primitives/src/markdown/katex.tsx
+@@ -13,11 +13,22 @@
+  * hast-util-to-jsx-runtime pipeline. The visual arm is the `.katex-html`
+  * span tree; the MathML arm serves assistive technology, which reads it by
+  * tag name regardless of namespace.
++ *
++ * KaTeX loads on demand. Streaming never parses math (`parseGfm` carries no
++ * math grammar, so `$...$` stays literal until the settle swap), so KaTeX is
++ * never on the streaming hot path; a session without math never downloads it.
++ * The first settled math node triggers a dynamic import of the KaTeX module
++ * and its stylesheet; `renderTexToReact` renders a literal-TeX placeholder
++ * until the module resolves, then {@link subscribeKatexLoaded} notifies
++ * subscribers to re-render with the full DOM. The post-load DOM is
++ * byte-identical to the previous static-import pipeline (same
++ * `renderToString` + `DOMParser` mapping), so the DOM-parity fixtures hold
++ * once the load completes.
+  */
+ 
+ import { createElement } from 'react'
+ import type { CSSProperties, ReactNode } from 'react'
+-import katex from 'katex'
++import type katexType from 'katex'
+ 
+ /**
+  * Convert one inline `style` attribute string into React's style object.
+@@ -55,15 +66,83 @@ function domToReact(node: ChildNode, key: number): ReactNode {
+     : createElement(element.localName, props, ...children)
+ }
+ 
++/** The lazily-loaded KaTeX default export; undefined until the import resolves. */
++let katexModule: typeof katexType | undefined
++/** In-flight or settled load promise, so the module and stylesheet are requested once. */
++let loadPromise: Promise<void> | undefined
++/** Subscribers re-rendered after KaTeX finishes loading (React callers). */
++const listeners = new Set<() => void>()
++/** Bumped on each load completion; the `useSyncExternalStore` snapshot. */
++let loadCount = 0
++
++/**
++ * Subscribe to KaTeX load completion; `listener` fires after the module and
++ * stylesheet resolve, so a caller that rendered the literal-TeX placeholder
++ * can re-render the full DOM. Uses the `useSyncExternalStore` subscribe
++ * signature; pair it with {@link katexLoadCount} as the snapshot. Returns an
++ * unsubscribe function.
++ * @param listener - invoked (no args) on load completion.
++ * @returns a disposer that removes the listener.
++ */
++export function subscribeKatexLoaded(listener: () => void): () => void {
++  listeners.add(listener)
++  return () => { listeners.delete(listener) }
++}
++
++/**
++ * The KaTeX load counter — a value that changes on load completion, so a
++ * `useSyncExternalStore` snapshot re-renders the subscriber when KaTeX
++ * becomes ready. Opaque: only its identity across renders matters.
++ * @returns the current load count.
++ */
++export function katexLoadCount(): number {
++  return loadCount
++}
++
++/**
++ * Ensure KaTeX is loaded. Resolves once the module and stylesheet are ready;
++ * idempotent — the first caller starts the import, later callers await the
++ * same promise. Tests call this in `beforeAll` to make synchronous renders
++ * produce the full KaTeX DOM immediately; production calls it implicitly on
++ * the first settled math node via {@link renderTexToReact}.
++ * @returns resolves when KaTeX is ready (or already was).
++ */
++export function ensureKatexLoaded(): Promise<void> {
++  if (katexModule !== undefined) return Promise.resolve()
++  loadPromise ??= (async () => {
++    // The module and stylesheet load together: the DOM KaTeX emits carries
++    // class names the stylesheet must style, so a loaded module without its
++    // CSS would flash unstyled math. Both ride one dynamic import so Vite
++    // emits one KaTeX chunk pair (JS + CSS) fetched on first math.
++    const [mod] = await Promise.all([
++      import('katex'),
++      import('katex/dist/katex.min.css'),
++    ])
++    katexModule = mod.default
++    loadCount += 1
++    for (const listener of listeners) listener()
++  })()
++  return loadPromise
++}
++
+ /**
+  * Render TeX source to React elements through KaTeX.
+  * @param value - The TeX source (math node value; fenced `math` blocks append
+  * their trailing newline to match the replaced pipeline's text extraction).
+  * @param displayMode - Display (block) versus inline rendering.
+- * @returns KaTeX's element tree, or the error span when the source does not
+- * parse (colored with KaTeX's stock `errorColor`, matching rehype-katex).
++ * @returns KaTeX's element tree, the literal-TeX placeholder before KaTeX
++ * loads, or the error span when the source does not parse (colored with
++ * KaTeX's stock `errorColor`, matching rehype-katex).
+  */
+ export function renderTexToReact(value: string, displayMode: boolean): ReactNode {
++  const katex = katexModule
++  if (katex === undefined) {
++    // Trigger the load once; render the literal TeX as a visible placeholder
++    // until subscribers re-render with the real DOM. Unreachable after load
++    // (and after the test-suite `beforeAll` preload).
++    void ensureKatexLoaded()
++    return <span className="katex-pending">{value}</span>
++  }
+   let html: string
+   try {
+     html = katex.renderToString(value, { displayMode, throwOnError: true })
+diff --git a/packages/client/ui-primitives/tests/markdown-dom-parity.client.spec.tsx b/packages/client/ui-primitives/tests/markdown-dom-parity.client.spec.tsx
+index 7019776..128e0eb 100644
+--- a/packages/client/ui-primitives/tests/markdown-dom-parity.client.spec.tsx
++++ b/packages/client/ui-primitives/tests/markdown-dom-parity.client.spec.tsx
+@@ -16,8 +16,14 @@
+ //   npx vitest run packages/client/ui-primitives/tests/markdown-dom-parity.spec.tsx
+ //   diff -r <recorded fixtures> <this branch's fixtures>   # byte-identical
+ import { cleanup, render } from '@testing-library/react'
+-import { afterEach, describe, expect, it } from 'vitest'
++import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+ import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
++import { ensureKatexLoaded } from '../src/markdown/katex.tsx'
++
++// KaTeX loads on demand; preload it so the math corpus documents render their
++// full DOM synchronously, matching the byte-for-byte fixtures (the post-load
++// DOM is identical to the previous static-import pipeline).
++beforeAll(async () => { await ensureKatexLoaded() })
+ 
+ afterEach(cleanup)
+ 
+diff --git a/packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx b/packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx
+index 4397aea..0e3493b 100644
+--- a/packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx
++++ b/packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx
+@@ -4,11 +4,17 @@
+ // mount of the same prefix shows, while reusing the frozen blocks' DOM nodes
+ // instead of remounting them.
+ import { cleanup, render } from '@testing-library/react'
+-import { afterEach, describe, expect, it } from 'vitest'
++import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+ import type { Root, RootContent } from 'mdast'
+ import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+ import { IncrementalMarkdownParser } from '../src/markdown/incremental.ts'
+ import { parseGfm } from '../src/markdown/parse.ts'
++import { ensureKatexLoaded } from '../src/markdown/katex.tsx'
++
++// KaTeX loads on demand; preload it so the synchronous `.katex` assertions
++// below see the full DOM (the settled math renders byte-identically once
++// the module is in the cache).
++beforeAll(async () => { await ensureKatexLoaded() })
+ 
+ afterEach(cleanup)
+ 
+diff --git a/packages/client/ui-primitives/tests/markdown.client.spec.tsx b/packages/client/ui-primitives/tests/markdown.client.spec.tsx
+index 6b35712..f342009 100644
+--- a/packages/client/ui-primitives/tests/markdown.client.spec.tsx
++++ b/packages/client/ui-primitives/tests/markdown.client.spec.tsx
+@@ -1,9 +1,16 @@
+ // @vitest-environment jsdom
+ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+-import { afterEach, describe, expect, it } from 'vitest'
++import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+ import { JsonBlock, MarkdownText, MessageText } from '@deepseek-ai/dsh-client-ui-primitives'
+ import { cjkFriendlyStrong } from '../src/markdown/cjkFriendlyStrong.ts'
+ import { mathCompatibility } from '../src/markdown/mathCompatibility.ts'
++import { ensureKatexLoaded } from '../src/markdown/katex.tsx'
++
++// KaTeX loads on demand; preload it so the synchronous `.katex` assertions
++// below see the full DOM (the settled math renders byte-identically once
++// the module is in the cache). The lazy path itself is covered by
++// markdown-katex-lazy.client.spec.tsx.
++beforeAll(async () => { await ensureKatexLoaded() })
+ 
+ afterEach(cleanup)
+ 
+diff --git a/packages/client/ui-settings-general/src/client/SettingsRoot.module.css b/packages/client/ui-settings-general/src/client/SettingsRoot.module.css
+index 060e8d1..1680819 100644
+--- a/packages/client/ui-settings-general/src/client/SettingsRoot.module.css
++++ b/packages/client/ui-settings-general/src/client/SettingsRoot.module.css
+@@ -47,7 +47,8 @@
+ }
+ 
+ /* Full-viewport layer (figma Mask 501:29946 #000@24%): mask tokens match the
+-   Modal primitive (--dsw-alias-bg-mask-1 + --dsw-mask-blur). */
++   Modal primitive (--dsw-alias-bg-mask-1 + --dsw-mask-blur).
++   On mobile the overlay fills the screen without centering. */
+ .overlay {
+   position: fixed;
+   inset: 0;
+@@ -57,6 +58,13 @@
+   justify-content: center;
+ }
+ 
++@media (max-width: 768px) {
++  .overlay {
++    align-items: stretch;
++    overscroll-behavior: contain;
++  }
++}
++
+ .mask {
+   position: absolute;
+   inset: 0;
+@@ -64,12 +72,20 @@
+   backdrop-filter: var(--dsw-mask-blur);
+ }
+ 
++@media (max-width: 768px) {
++  .mask {
++    background: var(--dsw-alias-bg-base);
++    backdrop-filter: none;
++  }
++}
++
+ /* Panel (figma Settings 501:29947): r24, white, lv3 shadow (figma effects
+    match --dsw-shadow-lv3 exactly); figma's 1080x700 is shrunk to 800 wide.
+    One height for every section, taken from the viewport rather than the
+    content: sections differ by hundreds of pixels (a settings list against the
+    composition editor), and a content-sized panel would resize under the
+-   pointer on every nav click. Whatever does not fit scrolls in `.options`. */
++   pointer on every nav click. Whatever does not fit scrolls in `.options`.
++   Below 768px the panel becomes full-screen with a horizontal nav strip. */
+ .panel {
+   position: relative;
+   z-index: 1;
+@@ -90,8 +106,25 @@
+   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+ }
+ 
++/* Mobile: full-screen panel, no border-radius, no shadow.
++   flex-direction: column so the nav strip sits above the content.
++   Smaller base font for phone readability. */
++@media (max-width: 768px) {
++  .panel {
++    flex-direction: column;
++    width: 100%;
++    height: 100%;
++    max-width: 100%;
++    max-height: 100%;
++    border-radius: 0;
++    box-shadow: none;
++    font-size: 12px;
++  }
++}
++
+ /* Nav rail (figma .Setting-nav 501:29958): 188 wide, pad (12,22,12,0),
+-   gap 18, no own fill — the panel white shows through. */
++   gap 18, no own fill — the panel white shows through.
++   On mobile the nav becomes a horizontal scrollable strip. */
+ .nav {
+   flex: none;
+   display: flex;
+@@ -102,7 +135,25 @@
+   box-sizing: border-box;
+ }
+ 
+-/* Title row (figma 501:29959): 16/500 lh24, 12px side padding. */
++@media (max-width: 768px) {
++  .nav {
++    flex-direction: row;
++    align-items: center;
++    gap: 0;
++    width: 100%;
++    padding: 0 8px;
++    overflow-x: auto;
++    overflow-y: hidden;
++    border-bottom: 1px solid var(--dsw-alias-border-l2);
++    scrollbar-width: none;
++  }
++  .nav::-webkit-scrollbar {
++    display: none;
++  }
++}
++
++/* Title row (figma 501:29959): 16/500 lh24, 12px side padding.
++   Hidden on mobile where the nav is a horizontal tab strip. */
+ .navTitle {
+   padding: 0 12px;
+   font-size: 16px;
+@@ -111,15 +162,32 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
+-/* Cell stack (figma 501:29961): gap 4. */
++@media (max-width: 768px) {
++  .navTitle {
++    display: none;
++  }
++}
++
++/* Cell stack (figma 501:29961): gap 4.
++   On mobile the cells are laid out horizontally for scrolling. */
+ .navList {
+   display: flex;
+   flex-direction: column;
+   gap: 4px;
+ }
+ 
++@media (max-width: 768px) {
++  .navList {
++    flex-direction: row;
++    gap: 2px;
++    padding: 8px 0;
++    flex: 1;
++  }
++}
++
+ /* Nav cell (figma .Setting-nav-cell 501:29962): 164x40, r12, pad
+-   (12,9,16,9), gap 8; label 14/400 lh22; selected fill #EBEEF2. */
++   (12,9,16,9), gap 8; label 14/400 lh22; selected fill #EBEEF2.
++   On mobile the cells become compact pill tabs. */
+ .navCell {
+   display: flex;
+   align-items: center;
+@@ -147,10 +215,32 @@
+   background: var(--dsw-specific-sidebar-nav-item-active);
+ }
+ 
++@media (max-width: 768px) {
++  .navCell {
++    flex: none;
++    height: 32px;
++    padding: 6px 12px;
++    border-radius: 8px;
++    white-space: nowrap;
++    font-size: 13px;
++    line-height: 20px;
++  }
++  .navCell.active {
++    background: var(--dsw-alias-bg-module-platform);
++    outline: 1px solid var(--dsw-alias-border-l2);
++  }
++}
++
+ .navIcon {
+   flex: none;
+ }
+ 
++@media (max-width: 768px) {
++  .navIcon {
++    display: none;
++  }
++}
++
+ .navLabel {
+   flex: 1;
+   min-width: 0;
+@@ -159,15 +249,20 @@
+   text-overflow: ellipsis;
+ }
+ 
+-/* Content column (figma Content 501:29980): header + options. */
++/* Content column (figma Content 501:29980): header + options.
++   On mobile the panel is full-height; min-height:0 and overflow:hidden
++   let the options area scroll properly. */
+ .content {
+   flex: 1;
+   min-width: 0;
++  min-height: 0;
++  overflow: hidden;
+   display: flex;
+   flex-direction: column;
+ }
+ 
+-/* Header (figma .Header 501:29981): h54, pad (10,20,14,8), close right. */
++/* Header (figma .Header 501:29981): h54, pad (10,20,14,8), close right.
++   On mobile reduce padding and make the header more compact. */
+ .header {
+   flex: none;
+   display: flex;
+@@ -179,6 +274,13 @@
+   box-sizing: border-box;
+ }
+ 
++@media (max-width: 768px) {
++  .header {
++    height: 44px;
++    padding: 12px 8px 4px;
++  }
++}
++
+ .actions {
+   min-width: 0;
+   display: flex;
+@@ -207,7 +309,8 @@
+   background: var(--dsw-alias-interactive-bg-hover);
+ }
+ 
+-/* Options area (figma Options 501:29983): pad (24,0,24,24), scrolls. */
++/* Options area (figma Options 501:29983): pad (24,0,24,24), scrolls.
++   On mobile reduce padding for more content space. */
+ .options {
+   flex: 1;
+   min-height: 0;
+@@ -215,6 +318,12 @@
+   overflow-y: auto;
+ }
+ 
++@media (max-width: 768px) {
++  .options {
++    padding: 0 16px 16px;
++  }
++}
++
+ /* Visually-hidden text seat (close button accessible name from slot content). */
+ .hiddenLabel {
+   position: absolute;
+diff --git a/packages/client/ui-settings-models/README.md b/packages/client/ui-settings-models/README.md
+index f0094c4..efebbc5 100644
+--- a/packages/client/ui-settings-models/README.md
++++ b/packages/client/ui-settings-models/README.md
+@@ -6,7 +6,7 @@ Models settings and product-onboarding plugin. The same client Cordis plugin reg
+ 
+ Rows are the *configured* providers (their profile resolves in the owning namespace); a whole-section provider whose key is not configured anywhere renders as its open setup card instead of a row, but only in the first-run posture — while no provider is registered with the credential its profile names — and only until the user closes that card, after which it is an ordinary row carrying the missing-key dot. Each card kind owns its own open state, so closing one never discards a draft in another. The add flow is a card carrying the dormant-directory provider select — a bare-mounted `llm-pi-ai` offers its whole installed catalog before any route exists. The pi-ai card additionally edits that route's **model list** and can ask the provider what it serves. A row labels API-key state with a green solid dot only when a referenced credential is confirmed configured, and with a red solid dot only when a named reference is confirmed missing; reference-free provider-native authentication and unavailable credential enrichment remain unmarked. The editor is a hand-written card per adapter family: the primary field is a single **API key** input — the page never asks for an environment-variable name; a typed key stores **write-only** through `credentials.set` under the profile's reference, deriving `<ROUTE>_API_KEY` when the profile has none, and the pi-ai profile records that derivation as `apiKeyEnv`, so `settings.yaml` never carries a key value. Leaving a new pi-ai provider's key blank saves a reference-free profile and therefore preserves provider-native authentication such as the Bedrock credential chain or Vertex ADC. A successful Apply emits a local accessible status message without echoing secret material. The collapsed 自定义设置 fold carries the curated extras — `baseURL` for both families (the deepseek placeholder shows the public endpoint), each adapter's model catalog, and the **display name** and **API protocol** of a pi-ai route the adapter does not ship. Those two are what a hand-declared route names for itself: the create card asks for both because nothing can default them, so the editor reaches both rather than leaving them to `settings.yaml`. Clearing the name unsets it and the route falls back to its id, which is what the placeholder shows; the protocol has no such fallback. A catalog route gets neither — it defaults its name from its catalog entry, and its models each carry their own protocol, so a route-level one could only override every one of them. The Provider ID stays fixed: it is the settings key, the name every other namespace and every logged session references, and the stem of a credential reference the page cannot read back to move. Reasoning effort is deliberately NOT among them: it is a per-model capability and the models under one provider disagree about which levels they accept, so a provider-scoped control could only be set to a value some of them reject — which would hide even the models that support the level. The composer's model picker offers each model its own levels, and a switch there records provider, model, and effort together as the default for the next session. The profile field stays in `settings.yaml` for a deployment that knows its route. Each DeepSeek row edits `id`, optional display `name`, and optional `contextWindow`/`maxTokens`; existing fields outside that curated set survive edits, while every other profile field stays owned by `settings.yaml`. A row is deletable only when the user layer alone carries it (removal restores the composition base), and its localized confirmation dialog names the provider in the title, description, and final action. A row is tagged **Custom** when the directory entry says the owning adapter ships nothing under that key. The tag follows that answer alone: having a stored profile does not make a route custom — narrowing a shipped provider's models stores one too — and an adapter that reports nothing leaves its rows untagged rather than being read as shipped.
+ 
+-The notice step owns its exact copy and version in `src/onboarding-copy.ts`. On loopback it compares and writes `ui-onboarding.welcomeNoticeVersion` through the existing settings API; only an explicit Continue records the current version. A non-loopback browser cannot use that Host-only namespace, so acknowledgement is process-local and the notice returns after reload.
++The notice step owns its exact copy and version in `src/onboarding-copy.ts`. On loopback it compares and writes `ui-onboarding.welcomeNoticeVersion` through the existing settings API; only an explicit Continue records the current version. A non-loopback browser cannot use that Host-only namespace, so the accepted version is echoed to localStorage instead — the notice stays dismissed across reloads rather than returning on every page load.
+ 
+ After that notice completes, the DeepSeek step projects first-run readiness from the same joined Models snapshot. ANY provider the user can already reach ends it without rendering — a registered route whose named credential reference is stored, including a read-only launch-environment credential, or one whose profile names no reference and therefore authenticates natively. Only a user with none is asked for the official DeepSeek key. A mounted, active adapter with a missing writable reference renders the existing `ProviderEditor` in credential-only mode inside the shared onboarding modal; `credentials.set` stays the only secret write, and no provider settings are changed. Configure later completes only this coordinator pass. An absent adapter, inactive route, failed join, read-only deployment, or unusable settings or credential capability completes the step without rendering; Models remains the diagnostic surface.
+ 
+diff --git a/packages/client/ui-settings-models/README.zh.md b/packages/client/ui-settings-models/README.zh.md
+index 68bb64d..2b15b73 100644
+--- a/packages/client/ui-settings-models/README.zh.md
++++ b/packages/client/ui-settings-models/README.zh.md
+@@ -6,7 +6,7 @@
+ 
+ 行是*已配置*的提供方（其 profile 在所属 namespace 中解析得出）；其配置键未在任何位置配置的整分节提供方会渲染为其展开的设置卡片而非一行，但仅限首次运行姿态——即尚无任何提供方已注册且备齐其 profile 所指名的凭据——且仅持续到用户关闭该卡片为止，此后它就是一行带缺失密钥点的普通行。每一类卡片各自持有自己的展开状态，因此关掉其中一张绝不会丢弃另一张里的草稿。「新增」流程则是一张承载休眠目录提供方选择框的卡片——裸挂载的 `llm-pi-ai` 在任何路由存在之前就能提供其完整的已安装 catalog。pi-ai 卡片还会编辑该路由的**模型列表**，并可查询提供方所提供的模型。只有确认引用的凭据已配置时，行才会以绿色实心点标示 API 密钥状态；只有确认具名引用缺失时，才会以红色实心点标示。无引用的提供方原生认证以及无法取得凭据补充信息时都不显示状态点。编辑器是每个适配器家族各一张的手写卡片：主字段是单独一个 **API 密钥**输入框——页面从不询问环境变量名；键入的密钥经 `credentials.set` 以**只写**方式存入 profile 的引用之下，profile 没有引用时便派生 `<ROUTE>_API_KEY`，pi-ai profile 会把这次派生记录为 `apiKeyEnv`，因此 `settings.yaml` 从不携带密钥值。为新的 pi-ai 提供方留空密钥会保存一个不带引用的 profile，因此能保留提供方原生认证，例如 Bedrock 凭据链或 Vertex ADC。「应用」成功后会发出本地无障碍状态消息，且绝不回显任何机密内容。收起的「自定义设置」折叠区承载精选的额外字段——两个家族都有 `baseURL`（deepseek 的占位符显示公共端点）、各适配器自己的模型目录，以及适配器未提供的那类 pi-ai 路由的**显示名称**与 **API 协议**。这两个字段是手工声明路由为自己命名的东西：创建卡片之所以索要它们，正因为没有东西能为它们兜底，因此编辑器也够得着这两个，而不是把它们留给 `settings.yaml`。清空名称即取消设置，路由退回自己的 id——占位符显示的就是它；协议没有这样的兜底。内置目录路由两个都不给：它的名称由目录条目兜底，它的每个模型各自带着自己的协议，路由级协议只可能把它们全部覆盖掉。Provider ID 保持固定：它是 settings 的键、是其他每个 namespace 与每一条已记录会话引用的名字，也是页面读不回、因而搬不走的凭据引用词干。推理等级刻意**不在**其中：它是按模型的能力，而同一提供方下各模型接受的档位并不一致，因此提供方级的控件只可能被设成其中一些模型会拒绝的值——那会连支持该档位的模型也一并隐藏。输入框的模型选择器为每个模型提供它自己的档位，在那里切换会把提供方、模型、推理等级一并记为下一个会话的默认值。profile 字段仍留在 `settings.yaml`，供清楚自己路由的部署使用。每条 DeepSeek 模型行可编辑 `id`、可选的显示名称 `name` 与可选的 `contextWindow`/`maxTokens`；精选集合以外的现有字段会在编辑后保留，其余每个 profile 字段仍归 `settings.yaml` 所有。只有当某行仅由用户层承载时它才可删除（删除会还原组合 base），其本地化确认对话框会在标题、说明和最终操作中点名该提供方。当目录条目表明拥有该路由的适配器在这个键下什么都没有时，该行会带上 **自定义** 标签。标签只跟随这个答案：存了 profile 并不使一条路由成为自定义——收窄一个内置提供方的模型同样会存下 profile——而什么都不回答的适配器，其路由保持无标签，不会被当成内置。
+ 
+-声明步骤在 `src/onboarding-copy.ts` 中持有完整文案和版本。回环访问会通过既有 settings API 比较并写入 `ui-onboarding.welcomeNoticeVersion`；只有明确点击「继续」才会记录当前版本。非回环浏览器无法使用这项仅限 Host 的 namespace，因此确认仅在当前进程有效，重载后声明会再次出现。
++声明步骤在 `src/onboarding-copy.ts` 中持有完整文案和版本。回环访问会通过既有 settings API 比较并写入 `ui-onboarding.welcomeNoticeVersion`；只有明确点击「继续」才会记录当前版本。非回环浏览器无法使用这项仅限 Host 的 namespace，因此已接受的版本会改为回写到 localStorage——声明在刷新后保持关闭，而不会每次加载页面都再次出现。
+ 
+ 声明完成后，DeepSeek 步骤会从同一个 Models 联接快照得出首次运行就绪状态。只要用户已经能触达**任何**一个提供方，它就直接完成而不渲染——已注册且其具名凭据引用已存储的路由（包括来自启动环境且只读的凭据），或 profile 根本不指名引用、因而走原生认证的路由。只有二者皆无的用户才会被要求填写 DeepSeek 官方密钥。适配器已挂载且活跃、引用可写但尚未配置时，既有 `ProviderEditor` 会以仅凭据模式渲染在共用引导弹窗中；`credentials.set` 仍是唯一的 secret 写入，且不会改变提供方设置。「稍后配置」只完成协调器当前这一轮。适配器缺失、路由不活跃、联接失败、部署只读或设置／凭据能力不可用时，该步骤不渲染并直接完成；Models 页仍是诊断界面。
+ 
+diff --git a/packages/client/ui-settings-models/src/client/ModelsSection.module.css b/packages/client/ui-settings-models/src/client/ModelsSection.module.css
+index 5203524..ca249d6 100644
+--- a/packages/client/ui-settings-models/src/client/ModelsSection.module.css
++++ b/packages/client/ui-settings-models/src/client/ModelsSection.module.css
+@@ -16,6 +16,12 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++@media (max-width: 768px) {
++  .section {
++    font-size: 12px;
++  }
++}
++
+ .title {
+   margin: 0;
+   font-size: 16px;
+@@ -24,6 +30,13 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++@media (max-width: 768px) {
++  .title {
++    font-size: 14px;
++    line-height: 20px;
++  }
++}
++
+ .intro {
+   margin: 0;
+   font-size: 14px;
+@@ -31,6 +44,13 @@
+   color: var(--dsw-alias-label-tertiary);
+ }
+ 
++@media (max-width: 768px) {
++  .intro {
++    font-size: 12px;
++    line-height: 18px;
++  }
++}
++
+ .notice {
+   margin: 0;
+   font-size: 12px;
+@@ -86,6 +106,13 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++@media (max-width: 768px) {
++  .rowName {
++    font-size: 12px;
++    line-height: 18px;
++  }
++}
++
+ /* Reads as an annotation on the name, not as a second name: caption size and
+    the secondary label tone, so it never competes with the row's own title. It
+    sits inside `rowIdentity` with the credential dot, which is what keeps it
+@@ -145,6 +172,17 @@
+   cursor: pointer;
+ }
+ 
++@media (max-width: 768px) {
++  .primaryButton,
++  .secondaryButton,
++  .addButton {
++    height: 32px;
++    padding: 0 10px;
++    font-size: 12px;
++    line-height: 18px;
++  }
++}
++
+ .primaryButton {
+   background: var(--dsw-alias-button-primary-fill);
+   color: var(--dsw-alias-label-primary-foreground);
+@@ -310,13 +348,20 @@
+ }
+ 
+ /* The two ways to gain a provider, as equal siblings spanning the same width
+-   as the rows above. Wraps rather than shrinking below a legible label. */
++   as the rows above. Wraps rather than shrinking below a legible label.
++   On mobile they stack vertically. */
+ .addActions {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 10px;
+ }
+ 
++@media (max-width: 768px) {
++  .addActions {
++    flex-direction: column;
++  }
++}
++
+ .addButton {
+   /* Overrides the shared button base above: these two are not pills sitting in
+      a footer but the last slot of the provider list, so they split the row
+@@ -331,6 +376,12 @@
+   border-radius: 12px;
+ }
+ 
++@media (max-width: 768px) {
++  .addButton {
++    min-width: 0;
++  }
++}
++
+ .addCard,
+ .setupCard {
+   border-radius: 12px;
+@@ -467,6 +518,13 @@
+   gap: 6px;
+ }
+ 
++@media (max-width: 768px) {
++  .modelRow {
++    grid-template-columns: 1fr auto;
++    gap: 4px;
++  }
++}
++
+ /* Square, label-free affordances: the row's own inputs carry the meaning, so
+    the actions stay glyphs and announce themselves through aria-label. */
+ .iconButton {
+@@ -506,6 +564,12 @@
+   padding: 8px 4px 2px;
+ }
+ 
++@media (max-width: 768px) {
++  .modelAdvanced {
++    grid-template-columns: 1fr;
++  }
++}
++
+ .modelField {
+   display: flex;
+   flex-direction: column;
+@@ -562,12 +626,19 @@
+ }
+ 
+ /* Enum pickers hold a handful of short options; a field-width dropdown reads
+-   as a text field the user is expected to fill. */
++   as a text field the user is expected to fill.
++   On mobile the picker should use the full available width. */
+ select.input {
+   max-width: 240px;
+   cursor: pointer;
+ }
+ 
++@media (max-width: 768px) {
++  select.input {
++    max-width: 100%;
++  }
++}
++
+ .input:focus {
+   outline: none;
+   border-color: var(--dsw-alias-brand-primary);
+diff --git a/packages/client/ui-settings-models/src/client/welcome-store.ts b/packages/client/ui-settings-models/src/client/welcome-store.ts
+index 6e139f1..d806aea 100644
+--- a/packages/client/ui-settings-models/src/client/welcome-store.ts
++++ b/packages/client/ui-settings-models/src/client/welcome-store.ts
+@@ -18,6 +18,33 @@ function messageOf(error: unknown): string {
+   return error instanceof Error ? error.message : String(error)
+ }
+ 
++/** LocalStorage key echoing the memory-mode acknowledgement across reloads. */
++const MEMORY_ACK_KEY = `${WELCOME_NOTICE_SETTINGS_NAMESPACE}/${WELCOME_NOTICE_ACK_FIELD}`
++
++/**
++ * Read the remembered memory-mode acknowledgement. Remote browsers cannot use
++ * the loopback-only settings API, so the version the user accepted is echoed
++ * to localStorage — the notice then stays dismissed across reloads instead of
++ * returning on every page load. Storage itself stays optional: an origin
++ * without it (private browsing, quota) falls back to process-local only.
++ */
++function readMemoryAck(): string | undefined {
++  try {
++    return globalThis.localStorage?.getItem(MEMORY_ACK_KEY) ?? undefined
++  } catch {
++    return undefined
++  }
++}
++
++/** Echo the accepted version (best-effort; a failing store is not an error). */
++function writeMemoryAck(version: string): void {
++  try {
++    globalThis.localStorage?.setItem(MEMORY_ACK_KEY, version)
++  } catch {
++    // Non-fatal: the acknowledgement still stands for this process.
++  }
++}
++
+ function acknowledgementOf(view: SettingsNamespaceView): string | undefined {
+   if (typeof view.value !== 'object' || view.value === null) return undefined
+   const value = (view.value as Record<string, unknown>)[WELCOME_NOTICE_ACK_FIELD]
+@@ -46,7 +73,17 @@ export class WelcomeNoticeStore {
+   async load(): Promise<void> {
+     const generation = ++this.generation
+     if (this.persistence === 'memory') {
+-      this.store.update((state) => { state.status = 'ready'; state.error = null })
++      const memoryAck = readMemoryAck()
++      this.store.update((state) => {
++        state.status = 'ready'
++        // localStorage is the cross-reload echo; without a usable store
++        // (private browsing, non-web test environment) keep the process-local
++        // value so a same-session reload cannot un-acknowledge the version.
++        state.acknowledged = memoryAck === undefined
++          ? state.acknowledged
++          : memoryAck === WELCOME_NOTICE_VERSION
++        state.error = null
++      })
+       return
+     }
+     this.store.update((state) => { state.status = 'loading'; state.error = null })
+@@ -80,6 +117,7 @@ export class WelcomeNoticeStore {
+   async acknowledge(): Promise<boolean> {
+     const generation = ++this.generation
+     if (this.persistence === 'memory') {
++      writeMemoryAck(WELCOME_NOTICE_VERSION)
+       this.store.update((state) => {
+         state.status = 'ready'
+         state.acknowledged = true
+diff --git a/packages/client/ui-settings-models/tests/welcome-store.client.spec.ts b/packages/client/ui-settings-models/tests/welcome-store.client.spec.ts
+index e1fa757..94503c7 100644
+--- a/packages/client/ui-settings-models/tests/welcome-store.client.spec.ts
++++ b/packages/client/ui-settings-models/tests/welcome-store.client.spec.ts
+@@ -1,10 +1,15 @@
+-import { describe, expect, it, vi } from 'vitest'
++// @vitest-environment jsdom
++import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
+ import { refreshWelcomeIfLoaded, WelcomeNoticeStore } from '../src/client/welcome-store.ts'
+ import {
+   WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_SETTINGS_NAMESPACE, WELCOME_NOTICE_VERSION,
+ } from '../src/onboarding-copy.ts'
+ 
++// Memory-mode acknowledgements echo into localStorage; isolate each test so a
++// stored version cannot leak across cases.
++beforeEach(() => { globalThis.localStorage?.clear() })
++
+ let rpc = 0
+ function ok<T>(value: T): RpcResponse<T> {
+   return { rpcId: `welcome-${rpc++}` as never, result: { ok: true, value } }
+@@ -38,10 +43,20 @@ describe('WelcomeNoticeStore', () => {
+ 
+     await controller.load()
+     expect(controller.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: false, error: null })
++
++    // A second store is a reload: before any acknowledgement it must show the
++    // notice again; after acknowledging once, the localStorage echo keeps it
++    // dismissed without ever touching the loopback-only settings API.
++    const reloaded = new WelcomeNoticeStore({ settings: { describe, mutate } } as never, 'memory')
++    await reloaded.load()
++    expect(reloaded.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: false, error: null })
++
+     await expect(controller.acknowledge()).resolves.toBe(true)
+     expect(controller.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: true, error: null })
+     await controller.load()
+     expect(controller.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: true, error: null })
++    await reloaded.load()
++    expect(reloaded.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: true, error: null })
+     expect(describe).not.toHaveBeenCalled()
+     expect(mutate).not.toHaveBeenCalled()
+   })
+diff --git a/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css b/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css
+index de10a3b..0b16115 100644
+--- a/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css
++++ b/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css
+@@ -237,6 +237,20 @@
+   margin: 8px 0 0;
+ }
+ 
++@media (max-width: 768px) {
++  .details {
++    grid-template-columns: 1fr;
++    gap: 2px;
++  }
++  .details div {
++    display: flex;
++    gap: 6px;
++  }
++  .details dt {
++    flex: none;
++  }
++}
++
+ .details div {
+   display: contents;
+ }
+diff --git a/packages/client/ui-settings-plugins/src/client/PluginsSettingsSection.module.css b/packages/client/ui-settings-plugins/src/client/PluginsSettingsSection.module.css
+index 5760403..9ccdad0 100644
+--- a/packages/client/ui-settings-plugins/src/client/PluginsSettingsSection.module.css
++++ b/packages/client/ui-settings-plugins/src/client/PluginsSettingsSection.module.css
+@@ -28,6 +28,17 @@
+   margin-top: 2px;
+ }
+ 
++@media (max-width: 768px) {
++  .tabs {
++    gap: 12px;
++    overflow-x: auto;
++    scrollbar-width: none;
++  }
++  .tabs::-webkit-scrollbar {
++    display: none;
++  }
++}
++
+ .tab {
+   position: relative;
+   border: 0;
+diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
+index d3fe6a6..712a5bc 100644
+--- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
++++ b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
+@@ -174,7 +174,7 @@ export function SidebarRoot({
+       <div className={css.regionArea}>
+         {renderSlot('sidebar.workspaces', {
+           wide,
+-          expandSidebar: () => { if (collapsed) toggleSidebar() },
++          expandSidebar: () => { toggleSidebar() },
+         })}
+       </div>
+ 
+diff --git a/packages/client/ui-theme/src/client/AppearanceRow.module.css b/packages/client/ui-theme/src/client/AppearanceRow.module.css
+index 6c5354b..76de580 100644
+--- a/packages/client/ui-theme/src/client/AppearanceRow.module.css
++++ b/packages/client/ui-theme/src/client/AppearanceRow.module.css
+@@ -25,7 +25,8 @@
+ 
+ /* Appearance cube (figma '.Selector Cube' 276x82 r16, pad 20/32, centered
+  * icon-over-label column, gap 4); flexed down from the figma width so all
+- * three sit on one row in the 800 panel, wrapping when narrower. */
++ * three sit on one row in the 800 panel, wrapping when narrower.
++ * On mobile the cubes become more compact. */
+ .themeCube {
+   box-sizing: border-box;
+   flex: 1 1 180px;
+@@ -45,6 +46,15 @@
+   cursor: pointer;
+ }
+ 
++@media (max-width: 768px) {
++  .themeCube {
++    flex: 1 1 100px;
++    padding: 14px 16px;
++    font-size: 13px;
++    line-height: 20px;
++  }
++}
++
+ .themeCube:hover:not(.selected) {
+   background: var(--dsw-alias-interactive-bg-hover);
+ }
+diff --git a/packages/client/ui-workspace/src/client/rows/Rows.module.css b/packages/client/ui-workspace/src/client/rows/Rows.module.css
+index 5dc899a..1ae5c7b 100644
+--- a/packages/client/ui-workspace/src/client/rows/Rows.module.css
++++ b/packages/client/ui-workspace/src/client/rows/Rows.module.css
+@@ -13,6 +13,9 @@
+   cursor: pointer;
+   user-select: none;
+   color: var(--dsw-alias-label-primary);
++  /* Taps fire immediately: without this, a touch browser may wait for a
++     possible double-tap (zoom) or drag, delaying the row's click. */
++  touch-action: manipulation;
+ }
+ 
+ .projectRow:hover,
+diff --git a/packages/client/ui-workspace/src/client/rows/Rows.tsx b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+index 481e0f0..af49d4e 100644
+--- a/packages/client/ui-workspace/src/client/rows/Rows.tsx
++++ b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+@@ -21,6 +21,13 @@ import css from './Rows.module.css'
+ /** The standard locale seat, prop-passed from the browser root. */
+ type RowTranslate = WorkspaceBrowserProps['t']
+ 
++/** Mobile viewport (<768px) matches the layout's MOBILE_BREAKPOINT and the
++ * CSS @media (max-width: 767px) block. Dragging is a pointer/hover surface
++ * feature: on a touch drawer a draggable row makes the browser wait for a
++ * potential drag before firing the click, so a tap opens the session only on
++ * the second attempt. Disable the drag affordance below the breakpoint. */
++const isMobileViewport = (): boolean => window.innerWidth < 768
++
+ /** Row display title: blank rows show the localized New Session label. */
+ function displayTitle(node: SessionNode, t: RowTranslate): string {
+   return node.blank ? t('session.new') : node.title
+@@ -132,7 +139,7 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, t }:
+       role="treeitem"
+       aria-expanded={row.expanded}
+       onClick={onToggle}
+-      draggable={drag !== undefined}
++      draggable={drag !== undefined && !isMobileViewport()}
+       onDragStart={drag === undefined
+         ? undefined
+         : (e) => {
+@@ -191,8 +198,12 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, t }:
+       </span>
+     </div>
+   )
+-  // The ungrouped bucket has no backing Workspace: no card to show.
+-  if (row.createdAt === undefined) return ownRow
++  // The ungrouped bucket has no backing Workspace, and a touch viewport has no
++  // pointer hover to dwell on: return the bare row in both cases. Wrapping the
++  // row in a HoverCard on touch runs its pointerdown-capture side effect (state
++  // flip) on every tap, which some mobile browsers answer by dropping the
++  // synthesized click — the row would then need a second tap to open.
++  if (row.createdAt === undefined || isMobileViewport()) return ownRow
+   return (
+     <HoverCard
+       anchor={ownRow}
+@@ -394,7 +405,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
+       role="treeitem"
+       aria-selected={selected}
+       onClick={() => { onOpen(node.id) }}
+-      draggable={drag !== undefined}
++      draggable={drag !== undefined && !isMobileViewport()}
+       onDragStart={drag === undefined
+         ? undefined
+         : (e) => {
+@@ -462,6 +473,10 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
+       )}
+     </div>
+   )
++  // Touch viewports have no pointer hover: return the bare row so a tap never
++  // routes through the HoverCard's pointerdown capture (its state flip makes
++  // some mobile browsers drop the synthesized click — the two-tap symptom).
++  if (isMobileViewport()) return ownRow
+   return (
+     <HoverCard
+       anchor={ownRow}
+diff --git a/packages/host/apiproxy/src/fetch/client.ts b/packages/host/apiproxy/src/fetch/client.ts
+index 70e3ece..0d37afc 100644
+--- a/packages/host/apiproxy/src/fetch/client.ts
++++ b/packages/host/apiproxy/src/fetch/client.ts
+@@ -296,8 +296,13 @@ export abstract class AbstractApiClient implements IApiClient {
+   }
+ 
+   protected mintRpcId(): RpcId {
+-    // crypto.randomUUID is a Web API (browser + Node ≥19): keeps this base platform-neutral.
+-    return RpcId(crypto.randomUUID())
++    // crypto.randomUUID is unavailable on insecure origins (HTTP over LAN IP).
++    // crypto.getRandomValues() is exposed by all major browsers everywhere.
++    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
++    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40
++    bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80
++    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
++    return RpcId(`${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}` as RpcId)
+   }
+ 
+   /**
+diff --git a/packages/session-query/session-log-export/src/client/HeaderAction.module.css b/packages/session-query/session-log-export/src/client/HeaderAction.module.css
+index 288e7f9..1622958 100644
+--- a/packages/session-query/session-log-export/src/client/HeaderAction.module.css
++++ b/packages/session-query/session-log-export/src/client/HeaderAction.module.css
+@@ -34,3 +34,19 @@
+ .sessionLogButton span {
+   white-space: nowrap;
+ }
++
++/* Mobile: the header is crowded, so the capsule collapses to the download
++   glyph alone — the label is hidden from paint but stays in the button's
++   accessible name (aria-label, HeaderAction.tsx). Mirrors the layout's
++   MOBILE_BREAKPOINT (a 32px disk matches the 18px radius). */
++@media (max-width: 767px) {
++  .sessionLogButton {
++    width: 32px;
++    min-width: 32px;
++    padding: 6px;
++  }
++
++  .sessionLogLabel {
++    display: none;
++  }
++}
+diff --git a/packages/session-query/session-log-export/src/client/HeaderAction.tsx b/packages/session-query/session-log-export/src/client/HeaderAction.tsx
+index 82dd031..97a0700 100644
+--- a/packages/session-query/session-log-export/src/client/HeaderAction.tsx
++++ b/packages/session-query/session-log-export/src/client/HeaderAction.tsx
+@@ -20,9 +20,14 @@ export function SessionLogDownloadHeaderAction(props: SessionLogDownloadDialogPr
+         className={css.sessionLogButton}
+         disabled={busy}
+         aria-busy={busy}
++        // The capsule label lives in the DOM for wide viewports; on mobile the
++        // CSS hides it and the button collapses to the glyph. Keep the name
++        // reachable at every width (screen readers and the accessible tree).
++        aria-label="Session log"
++        title="Session log"
+         onClick={() => { void request(sessionId) }}
+       >
+-        <span>Session log</span>
++        <span className={css.sessionLogLabel}>Session log</span>
+         <IconDownloadOutline16 size={12} />
+       </button>
+       <SessionLogDownloadDialog {...props} />

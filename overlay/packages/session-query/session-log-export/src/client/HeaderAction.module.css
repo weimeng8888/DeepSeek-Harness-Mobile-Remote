@@ -1,0 +1,52 @@
+.sessionLogButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 111px;
+  height: 32px;
+  padding: 6px 12px;
+  gap: 4px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 18px;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  font-family: var(--dsw-font-family);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.sessionLogButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.sessionLogButton:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: wait;
+}
+
+.sessionLogButton span,
+.sessionLogButton svg {
+  flex: none;
+}
+
+.sessionLogButton span {
+  white-space: nowrap;
+}
+
+/* Mobile: the header is crowded, so the capsule collapses to the download
+   glyph alone — the label is hidden from paint but stays in the button's
+   accessible name (aria-label, HeaderAction.tsx). Mirrors the layout's
+   MOBILE_BREAKPOINT (a 32px disk matches the 18px radius). */
+@media (max-width: 767px) {
+  .sessionLogButton {
+    width: 32px;
+    min-width: 32px;
+    padding: 6px;
+  }
+
+  .sessionLogLabel {
+    display: none;
+  }
+}

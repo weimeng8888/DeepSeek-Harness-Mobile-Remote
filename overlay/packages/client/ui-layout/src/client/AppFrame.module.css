@@ -1,0 +1,219 @@
+.frame {
+  position: relative; /* anchors the drag handles, which straddle column borders */
+  display: grid;
+  grid-template-rows: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
+  /* Collapse/expand animates the tracks on the deepsuite sider curve
+     (--ds-ease-in-out / --ds-transition-duration-slow, ui-theme base.css). */
+  transition: grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+/* Dragging writes widths at pointer cadence; easing them would detach the
+   column from the handle. */
+.frame[data-dragging] {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frame {
+    transition: none;
+  }
+}
+
+.sidebarCol {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--dsw-specific-sidebar-fill);
+  border-right: 1px solid var(--dsw-alias-border-l1);
+}
+
+.centerCol {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detailsCol {
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* The details subtree stays mounted at zero width, so its border must not paint
+   a 1px seam. The collapsed sidebar instead retains a bordered compact rail. */
+.frame[data-details-collapsed] .detailsCol {
+  border-left: none;
+}
+
+/* ── mobile layout: sidebar drawer + full-screen details slide-over ──────────
+   Below MOBILE_BREAKPOINT the grid keeps a single center track
+   (`sidebar: 0 details: 0` inline); the sidebar and details columns are
+   absolutely positioned overlays riding the frame box. The sidebar drawer is
+   an off-canvas panel that translates in/out; the details column slides in
+   from the right at full width. The overlay z-stack (low → high): menuButton
+   (9), drawerBackdrop (18), drawer sidebar (19), details slide-over (21) —
+   shell.overlay (20, AppFrame data-shell-overlay) stays above the drawer so
+   system overlays still paint over it but below an open details panel. */
+
+/* Off-canvas drawer seat: full-height, left-anchored at its fixed width. */
+.frame[data-mobile] .sidebarCol {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 19;
+  border-right: 1px solid var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-shadow-lv3);
+  transform: translateX(-100%);
+  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.frame[data-mobile] .sidebarCol::after {
+  content: '';
+  display: block;
+  height: env(safe-area-inset-bottom, 0px);
+}
+
+.frame[data-mobile][data-drawer-open] .sidebarCol {
+  transform: translateX(0);
+}
+
+/* Details becomes a full-width slide-over while a call is selected (details
+   col is transparent when no material is open — the panel's own chrome fills
+   it). */
+.frame[data-mobile] .detailsCol {
+  position: absolute;
+  inset: 0;
+  z-index: 21;
+  border-left: none;
+  background: var(--dsw-alias-bg-base);
+  transform: translateX(100%);
+  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.frame[data-mobile][data-details-open] .detailsCol {
+  transform: translateX(0);
+}
+
+/* Floating menu button: the only always-visible drawer opener on phones;
+   floats above the conversation header without participating in its layout. */
+.menuButton {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: 12px;
+  z-index: 9;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-button-floating-fill);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-shadow-lv2);
+  cursor: pointer;
+}
+
+.menuButton:hover {
+  background: var(--dsw-alias-button-floating-hover);
+}
+
+/* Drawer backdrop: dims and blocks the conversation while the drawer is open. */
+.drawerBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 18;
+  border: none;
+  padding: 0;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 24%, transparent);
+  cursor: pointer;
+  animation: dsh-backdrop-in 200ms var(--ds-ease-in-out);
+}
+
+@keyframes dsh-backdrop-in {
+  from { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frame[data-mobile] .sidebarCol,
+  .frame[data-mobile] .detailsCol,
+  .drawerBackdrop {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* Drag handles are frame children (columns clip overflow): an 8px hit strip
+   centered on the column border via inline left, above column content. Details
+   adds a visible 12x32 pill at vertical center; sidebar keeps only the hit strip. */
+.handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  margin-left: -4px;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+  /* Rides the same curve as the tracks so the pill stays on the moving
+     border during collapse/expand; paused while dragging (frame rule). */
+  transition: left var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.frame[data-dragging] .handle {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .handle {
+    transition: none;
+  }
+}
+
+.handle[data-side='details']::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 32px;
+  border-radius: 10px;
+  box-sizing: border-box;
+  background: var(--dsw-alias-button-floating-fill);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
+  /* Hover affordance: the details pill hides until the pointer is over its
+     column, the strip itself, or a drag. */
+  opacity: 0;
+  transition:
+    opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    background var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.detailsCol:hover ~ .handle[data-side='details']::after,
+.handle[data-side='details']:hover::after,
+.handle[data-side='details'][data-dragging='true']::after {
+  opacity: 1;
+}
+
+.handle[data-side='details']:hover::after,
+.handle[data-side='details'][data-dragging='true']::after {
+  background: var(--dsw-alias-button-floating-hover);
+  border-color: var(--dsw-alias-border-l3);
+}
+
+.overlayLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.overlayLayer > * {
+  pointer-events: auto;
+}
